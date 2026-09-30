@@ -1,0 +1,4 @@
+interface:
+  display_name: "自适应学习手册"
+  short_description: "依据诊断证据自适应生成深入、完整且可验证的学习手册"
+  default_prompt: "Use $build-adaptive-learning-handbook to turn an evidence-backed learning diagnosis into a detailed adaptive learning handbook."

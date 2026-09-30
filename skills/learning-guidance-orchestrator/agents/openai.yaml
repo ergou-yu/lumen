@@ -1,0 +1,4 @@
+interface:
+  display_name: "Learning Guidance Orchestrator"
+  short_description: "Forced assess→path→resources learning session"
+  default_prompt: "Use $learning-guidance-orchestrator to run a complete learning-guidance session in the forced ordering: intent → knowledge relations → assessment → learning path → scenario-based resources."

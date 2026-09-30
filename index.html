@@ -1,0 +1,279 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+<title>Lumen · 私人 AI 代理</title>
+<meta name="description" content="Lumen —— 印象派风格的开源私人 AI 代理：替你把事情办成。多模型接入、动作审批、后台任务、目标追踪。">
+<!--
+  Lumen —— 私人 AI 代理 · 莫奈印象派风格
+  零构建纯静态应用：双击本文件即可在浏览器运行。
+  视觉基底来自 motion-skill-kit 的 impressionism（莫奈点彩水面）风格套件，
+  动效来自 per-char-reveal / fade-slide-route / ken-burns / noise-grain 四个片段。
+-->
+<link rel="stylesheet" href="css/lumen.css">
+</head>
+<body>
+
+<!-- 莫奈点彩水面：全站氛围背景（canvas，出场上色后持续缓慢演化） -->
+<canvas id="monet-bg" aria-hidden="true"></canvas>
+
+<!-- 应用主体：半透明画纸质感面板浮在水面之上 -->
+<div id="app">
+
+  <!-- 侧边导航（桌面端） -->
+  <aside id="sidebar">
+    <div class="brand">
+      <div class="brand-mark" aria-hidden="true">
+        <!-- 品牌徽标：一轮映在水面的太阳（莫奈《日出·印象》） -->
+        <svg viewBox="0 0 48 48" width="34" height="34">
+          <ellipse cx="24" cy="30" rx="17" ry="7" fill="#3d6b8e" opacity="0.55"/>
+          <ellipse cx="24" cy="31" rx="12" ry="4.5" fill="#6fa3c2" opacity="0.6"/>
+          <circle cx="27" cy="16" r="7" fill="#e8b04b"/>
+          <ellipse cx="27" cy="20" rx="9" ry="2.2" fill="#f2ead8" opacity="0.8"/>
+          <ellipse cx="14" cy="36" rx="8" ry="2.4" fill="#c98bb9" opacity="0.7"/>
+        </svg>
+      </div>
+      <div class="brand-name">Lumen</div>
+    </div>
+
+    <nav id="side-nav">
+      <button class="nav-btn" data-tab="chat" type="button">
+        <svg viewBox="0 0 24 24" class="ico"><path d="M4 5h16v11H8l-4 4V5z"/></svg>
+        <span>聊天</span>
+        <em class="nav-badge" id="badge-chat" hidden></em>
+      </button>
+      <button class="nav-btn" data-tab="feed" type="button">
+        <svg viewBox="0 0 24 24" class="ico"><path d="M4 6h16M4 12h16M4 18h10"/></svg>
+        <span>动态</span>
+      </button>
+      <button class="nav-btn" data-tab="ideas" type="button">
+        <svg viewBox="0 0 24 24" class="ico"><path d="M9 18h6M10 21h4M12 3a6 6 0 0 0-4 10c.6.6 1 1.2 1 2h6c0-.8.4-1.4 1-2a6 6 0 0 0-4-10z"/></svg>
+        <span>灵感</span>
+      </button>
+      <button class="nav-btn" data-tab="goals" type="button">
+        <svg viewBox="0 0 24 24" class="ico"><circle cx="12" cy="12" r="9"/><circle cx="12" cy="12" r="5"/><circle cx="12" cy="12" r="1.5"/></svg>
+        <span>目标</span>
+        <em class="nav-badge" id="badge-goals" hidden></em>
+      </button>
+      <button class="nav-btn" data-tab="files" type="button">
+        <svg viewBox="0 0 24 24" class="ico"><path d="M6 3h9l4 4v14H6V3zM14 3v5h5"/></svg>
+        <span>文件</span>
+        <em class="nav-badge" id="badge-files" hidden></em>
+      </button>
+      <button class="nav-btn" data-tab="memory" type="button">
+        <svg viewBox="0 0 24 24" class="ico"><path d="M12 4a4 4 0 0 0-4 4c0 1.5-.5 2.5-1.5 3.5L5 13h14l-1.5-1.5C16.5 10.5 16 9.5 16 8a4 4 0 0 0-4-4zM10 17a2 2 0 0 0 4 0"/></svg>
+        <span>记忆</span>
+        <em class="nav-badge" id="badge-memory" hidden></em>
+      </button>
+      <button class="nav-btn" data-tab="computer" type="button">
+        <svg viewBox="0 0 24 24" class="ico"><rect x="3" y="5" width="18" height="12" rx="2"/><path d="M9 20h6M12 17v3"/></svg>
+        <span>计算机</span>
+      </button>
+      <button class="nav-btn" data-tab="skills" type="button">
+        <svg viewBox="0 0 24 24" class="ico"><path d="M12 3l2.2 5.6L20 11l-5.8 2.4L12 19l-2.2-5.6L4 11l5.8-2.4L12 3z"/></svg>
+        <span>技能</span>
+      </button>
+    </nav>
+
+    <div class="side-foot">
+      <button class="nav-btn" id="btn-settings" type="button">
+        <svg viewBox="0 0 24 24" class="ico"><circle cx="12" cy="12" r="3.2"/><path d="M12 2v3M12 19v3M2 12h3M19 12h3M4.9 4.9l2.1 2.1M17 17l2.1 2.1M19.1 4.9L17 7M7 17l-2.1 2.1"/></svg>
+        <span>设置</span>
+      </button>
+      <div class="side-note">画光的人，替你做事</div>
+    </div>
+  </aside>
+
+  <!-- 主区域：五个 Tab 面板 -->
+  <main id="main">
+
+    <!-- ===== 聊天 ===== -->
+    <section id="panel-chat" class="panel">
+      <header class="chat-head">
+        <div class="agent-id">
+          <div class="avatar" id="agent-avatar" aria-hidden="true">
+            <!-- Lumi 头像：莫奈《睡莲》真迹（公有领域数字化图像） -->
+            <img src="assets/monet-avatar.jpg" alt="">
+          </div>
+          <div class="agent-meta">
+            <div class="agent-name" id="agent-name">Lumi</div>
+            <div class="agent-status"><i class="dot"></i><span id="agent-status">随时待命</span></div>
+          </div>
+        </div>
+        <div class="chat-actions">
+          <button class="chip" id="model-chip" type="button" title="切换模型">演示模式 ▾</button>
+          <button class="icon-btn" id="btn-history" type="button" title="历史对话">
+            <svg viewBox="0 0 24 24" class="ico"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3.5 2"/></svg>
+          </button>
+          <button class="icon-btn" id="btn-new-chat" type="button" title="新对话">
+            <svg viewBox="0 0 24 24" class="ico"><path d="M12 5v14M5 12h14"/></svg>
+          </button>
+        </div>
+      </header>
+
+      <div id="chat-scroll">
+        <div id="chat-list"></div>
+      </div>
+
+      <footer class="composer-wrap">
+        <div class="composer">
+          <textarea id="input" rows="1" placeholder="交给 Lumi 去做 —— 比如「帮我查一下周五去京都的航班」"></textarea>
+          <button id="btn-mic" class="icon-btn mic-btn" type="button" title="语音输入" aria-label="语音输入" hidden>
+            <svg viewBox="0 0 24 24" class="ico"><rect x="9" y="4" width="6" height="11" rx="3"/><path d="M5 11a7 7 0 0 0 14 0M12 18v3"/></svg>
+          </button>
+          <button id="btn-send" class="send-btn" type="button" title="发送" aria-label="发送">
+            <svg viewBox="0 0 24 24" class="ico"><path d="M3 11l18-8-8 18-2.5-7.5L3 11z"/></svg>
+          </button>
+          <button id="btn-stop" class="stop-btn" type="button" title="中断任务" aria-label="中断任务" hidden>
+            <svg viewBox="0 0 24 24" class="ico"><rect x="7" y="7" width="10" height="10" rx="1.5"/></svg>
+          </button>
+        </div>
+        <div class="composer-hint">Lumi 会在关键动作前请求你的批准 · 随时可中断 · 切换页面它仍在后台继续工作</div>
+      </footer>
+    </section>
+
+    <!-- ===== 动态 ===== -->
+    <section id="panel-feed" class="panel" hidden>
+      <header class="page-head">
+        <h1>动态</h1>
+        <p class="page-sub">你的兴趣与优先级简报 —— Lumi 持续为你关注</p>
+      </header>
+      <div id="feed-interests" class="interest-row"></div>
+      <div id="feed-list" class="feed-list"></div>
+    </section>
+
+    <!-- ===== 灵感 ===== -->
+    <section id="panel-ideas" class="panel" hidden>
+      <header class="page-head">
+        <h1>灵感</h1>
+        <p class="page-sub">不知道让代理做什么？从这些点子开始</p>
+      </header>
+      <div id="ideas-grid" class="ideas-grid"></div>
+    </section>
+
+    <!-- ===== 目标 ===== -->
+    <section id="panel-goals" class="panel" hidden>
+      <header class="page-head row">
+        <div>
+          <h1>目标</h1>
+          <p class="page-sub">Lumi 从你们的对话中记住的长线目标，并持续推进</p>
+        </div>
+        <button class="chip solid" id="btn-add-goal" type="button">＋ 新目标</button>
+      </header>
+      <div id="goals-list" class="goals-list"></div>
+    </section>
+
+    <!-- ===== 文件 ===== -->
+    <section id="panel-files" class="panel" hidden>
+      <header class="page-head">
+        <h1>文件</h1>
+        <p class="page-sub">Lumi 为你生成的文档、画作与提醒</p>
+      </header>
+      <div id="files-grid" class="files-grid"></div>
+    </section>
+
+    <!-- ===== 记忆 ===== -->
+    <section id="panel-memory" class="panel" hidden>
+      <header class="page-head row">
+        <div>
+          <h1>记忆</h1>
+          <p class="page-sub">Lumi 记住的关于你的信息 —— 越用越懂你；可编辑，可遗忘</p>
+        </div>
+        <button class="chip solid" id="btn-add-memory" type="button">＋ 手动记一条</button>
+      </header>
+      <div id="memory-list" class="goals-list"></div>
+    </section>
+
+    <!-- ===== 计算机（LumenBox：Lumi 自己的虚拟计算机） ===== -->
+    <section id="panel-computer" class="panel" hidden>
+      <header class="page-head row">
+        <div>
+          <h1>计算机</h1>
+          <p class="page-sub">Lumi 的虚拟计算机——轻量虚拟浏览器 + LumenBox Desktop 桌面虚拟机（Sentinel 全程审查，不碰你的电脑）</p>
+        </div>
+        <button class="chip" id="btn-vm-refresh" type="button">刷新状态</button>
+      </header>
+      <div id="vm-view" class="vm-view"><!-- 由 ui.js 渲染 --></div>
+    </section>
+
+    <!-- ===== 技能 ===== -->
+    <section id="panel-skills" class="panel" hidden>
+      <header class="page-head">
+        <h1>技能</h1>
+        <p class="page-sub">Lumi 的内置技能库 —— 启用后作为它的专业知识与执行能力（由本地服务桥提供）</p>
+      </header>
+      <div id="skills-list" class="skills-list"></div>
+    </section>
+
+  </main>
+</div>
+
+<!-- 移动端底部 Tab -->
+<nav id="tabbar" aria-label="主导航">
+  <button class="tab-btn" data-tab="chat" type="button">
+    <svg viewBox="0 0 24 24" class="ico"><path d="M4 5h16v11H8l-4 4V5z"/></svg><span>聊天</span>
+  </button>
+  <button class="tab-btn" data-tab="feed" type="button">
+    <svg viewBox="0 0 24 24" class="ico"><path d="M4 6h16M4 12h16M4 18h10"/></svg><span>动态</span>
+  </button>
+  <button class="tab-btn" data-tab="ideas" type="button">
+    <svg viewBox="0 0 24 24" class="ico"><path d="M9 18h6M10 21h4M12 3a6 6 0 0 0-4 10c.6.6 1 1.2 1 2h6c0-.8.4-1.4 1-2a6 6 0 0 0-4-10z"/></svg><span>灵感</span>
+  </button>
+  <button class="tab-btn" data-tab="goals" type="button">
+    <svg viewBox="0 0 24 24" class="ico"><circle cx="12" cy="12" r="9"/><circle cx="12" cy="12" r="5"/><circle cx="12" cy="12" r="1.5"/></svg><span>目标</span>
+  </button>
+  <button class="tab-btn" data-tab="files" type="button">
+    <svg viewBox="0 0 24 24" class="ico"><path d="M6 3h9l4 4v14H6V3zM14 3v5h5"/></svg><span>文件</span>
+  </button>
+  <button class="tab-btn" data-tab="memory" type="button">
+    <svg viewBox="0 0 24 24" class="ico"><path d="M12 4a4 4 0 0 0-4 4c0 1.5-.5 2.5-1.5 3.5L5 13h14l-1.5-1.5C16.5 10.5 16 9.5 16 8a4 4 0 0 0-4-4zM10 17a2 2 0 0 0 4 0"/></svg><span>记忆</span>
+  </button>
+  <button class="tab-btn" data-tab="computer" type="button">
+    <svg viewBox="0 0 24 24" class="ico"><rect x="3" y="5" width="18" height="12" rx="2"/><path d="M9 20h6M12 17v3"/></svg><span>计算机</span>
+  </button>
+  <button class="tab-btn" data-tab="skills" type="button">
+    <svg viewBox="0 0 24 24" class="ico"><path d="M12 3l2.2 5.6L20 11l-5.8 2.4L12 19l-2.2-5.6L4 11l5.8-2.4L12 3z"/></svg><span>技能</span>
+  </button>
+</nav>
+
+<!-- 模型快捷切换气泡 -->
+<div id="model-popover" class="popover" hidden></div>
+
+<!-- 设置弹窗 -->
+<div id="settings-modal" class="modal" hidden>
+  <div class="modal-card">
+    <header class="modal-head">
+      <h2>设置</h2>
+      <button class="icon-btn" id="btn-close-settings" type="button" title="关闭" aria-label="关闭">
+        <svg viewBox="0 0 24 24" class="ico"><path d="M6 6l12 12M18 6L6 18"/></svg>
+      </button>
+    </header>
+    <div class="modal-body" id="settings-body"><!-- 由 ui.js 渲染 --></div>
+  </div>
+</div>
+
+<!-- 通用弹窗（文档查看等） -->
+<div id="viewer-modal" class="modal" hidden>
+  <div class="modal-card wide">
+    <header class="modal-head">
+      <h2 id="viewer-title">文档</h2>
+      <button class="icon-btn" id="btn-close-viewer" type="button" title="关闭" aria-label="关闭">
+        <svg viewBox="0 0 24 24" class="ico"><path d="M6 6l12 12M18 6L6 18"/></svg>
+      </button>
+    </header>
+    <div class="modal-body" id="viewer-body"></div>
+  </div>
+</div>
+
+<!-- Toast 通知 -->
+<div id="toasts" aria-live="polite"></div>
+
+<script src="js/monet-bg.js"></script>
+<script src="js/store.js"></script>
+<script src="js/providers.js"></script>
+<script src="js/agent.js"></script>
+<script src="js/ui.js"></script>
+<script>window.addEventListener('DOMContentLoaded', function(){ LumenUI.init(); });</script>
+</body>
+</html>

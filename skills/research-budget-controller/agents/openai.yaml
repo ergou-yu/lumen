@@ -1,0 +1,4 @@
+interface:
+  display_name: "Research Budget Controller"
+  short_description: "Enforce shared research budgets across calls and retries"
+  default_prompt: "Use $research-budget-controller to start or resume this research run within its existing authorized cap."

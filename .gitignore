@@ -1,0 +1,25 @@
+# 运行期产物（克隆后自动生成，不入库）
+vm-home/
+lumen-vm.json
+lumen-tasks.json
+lumen-desktop-tasks.json
+# 凭证安全区：绝不入库（0600 文件，只存在你本机）
+lumen-vault.json
+# 自定义恶意站点名单（可选文件，含个人配置则不入库）
+vm-denylist.txt
+
+# 系统
+.DS_Store
+*.log
+node_modules/
+
+# 本地参考资料（3.3MB 调研报告 PDF，按需自留，不随仓库分发）
+Meta_Muse深度调研报告.pdf
+
+# Python 缓存与杂物
+__pycache__/
+*.pyc
+
+# 宣传册渲染产物（由 lumen-brochure.html 导出，不入库）
+docs/brochure/*.pdf
+docs/brochure/page-*.png

@@ -1,0 +1,28 @@
+{
+  "name": "quick-computer-use",
+  "displayName": "QCU 计算机操作",
+  "version": "2.0.0rc1",
+  "triggers": [
+    "操作电脑",
+    "电脑上操作",
+    "帮我操作",
+    "操作网页",
+    "操作浏览器",
+    "打开浏览器",
+    "打开这个网页",
+    "点一下",
+    "点击按钮",
+    "填表",
+    "桌面应用",
+    "原生应用",
+    "控制鼠标",
+    "屏幕上的",
+    "computer use",
+    "use the computer",
+    "operate the browser",
+    "click the button",
+    "open the app",
+    "automate the",
+    "drive the ui"
+  ]
+}

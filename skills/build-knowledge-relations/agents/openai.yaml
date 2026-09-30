@@ -1,0 +1,4 @@
+interface:
+  display_name: "专利知识关系构建"
+  short_description: "基于专利流程发现、确定性验证并签发可信知识关系图回执"
+  default_prompt: "Use $build-knowledge-relations to build a source-backed CourseGraph, run deterministic validation, and report only the generated integrity receipt."

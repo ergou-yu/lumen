@@ -1,0 +1,4 @@
+interface:
+  display_name: "Mirroria 交付辩论"
+  short_description: "选择最轻交付模式，用真实执行与证据门禁阻止空话验收"
+  default_prompt: "Use $mirroria-delivery-debate to choose the lightest sufficient mode, execute the requested delivery, and require evidence before completion; use an adversarial reviewer only when the selected mode requires one."

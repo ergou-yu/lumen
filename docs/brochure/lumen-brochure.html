@@ -1,0 +1,453 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<title>Lumen · 私人 AI 代理 · 功能全集</title>
+<style>
+  /* ============ 莫奈图录设计系统 ============ */
+  @page { size: 210mm 297mm; margin: 0; }
+  html, body {
+    margin: 0; padding: 0;
+    background: #2e4d66; /* 与最深页面（封面）一致，防亚像素白边 */
+  }
+  :root {
+    --water-deep: #3d6b8e;
+    --water: #6fa3c2;
+    --water-light: #9ec9d8;
+    --sun: #e8b04b;
+    --lily: #c98bb9;
+    --leaf: #7fae7a;
+    --cream: #f2ead8;
+    --paper: #faf7ef;
+    --ink: #243a4d;
+    --ink-soft: #54718a;
+  }
+  .page {
+    width: 210mm; height: 297mm;
+    position: relative;
+    background: var(--paper);
+    page-break-after: always;
+    color: var(--ink);
+    font-family: "Songti SC", "STSong", "SimSun", serif;
+    box-sizing: border-box;
+    line-break: strict;
+  }
+  .page:last-child { page-break-after: auto; }
+  .inner { position: absolute; inset: 0; padding: 18mm 17mm 16mm; box-sizing: border-box; display: flex; flex-direction: column; }
+
+  /* —— 展览图录式页眉 —— */
+  .kicker {
+    font-family: "Snell Roundhand", "Bradley Hand", cursive;
+    font-size: 15pt; color: var(--water-deep);
+    letter-spacing: 1px;
+  }
+  .kicker .zh { font-family: "Songti SC", serif; font-size: 10.5pt; color: var(--ink-soft); letter-spacing: 6px; }
+  h1.sec {
+    font-family: "Songti SC", "STSong", serif;
+    font-weight: 900; font-size: 30pt; letter-spacing: 4px;
+    margin: 4mm 0 2mm; color: var(--ink);
+  }
+  .sec-sub { font-size: 11pt; color: var(--ink-soft); line-height: 1.75; margin-bottom: 5mm; }
+  .rule { height: 1px; background: linear-gradient(90deg, var(--water-deep), rgba(111,163,194,.15)); margin: 3mm 0 6mm; }
+
+  /* —— 章节水纹带 —— */
+  .band { width: 100%; height: 26mm; object-fit: cover; border-radius: 14px; display: block; margin: 4mm 0 6mm; }
+
+  /* —— 卡片 —— */
+  .cards { display: flex; flex-wrap: wrap; gap: 4mm; }
+  .card .card { padding: 3.6mm 4.2mm; }
+  .card {
+    flex: 1 1 44%;
+    background: rgba(255,255,252,.92);
+    border: 1px solid rgba(61,107,142,.16);
+    border-radius: 12px;
+    padding: 4.2mm 5mm;
+    box-sizing: border-box;
+  }
+  .card.wide { flex: 1 1 100%; }
+  .card h3 { font-size: 13pt; font-weight: 700; margin: 0 0 1.8mm; color: var(--water-deep); letter-spacing: 1px; }
+  .card h3 .en { font-family: "Snell Roundhand", cursive; font-weight: 400; font-size: 12pt; color: var(--lily); margin-left: 2mm; }
+  .card p, .card li { font-size: 9.8pt; line-height: 1.72; color: var(--ink); margin: 0; }
+  .card ul { margin: 1mm 0 0; padding-left: 5mm; }
+  .card li { margin: 0.8mm 0; }
+
+  .tag {
+    display: inline-block; font-size: 8pt; letter-spacing: 2px;
+    color: var(--cream); background: var(--water-deep);
+    border-radius: 999px; padding: 1mm 3.6mm; margin-right: 2mm;
+    vertical-align: 2px;
+  }
+  .tag.gold { background: rgba(232,176,75,.9); color: #5a3c0a; }
+  .tag.rose { background: rgba(201,139,185,.85); color: #4d2540; }
+
+  /* —— 流程步骤条 —— */
+  .flow { display: flex; align-items: stretch; gap: 0; margin: 3mm 0 2mm; }
+  .flow .step {
+    flex: 1; text-align: center; padding: 3mm 1.5mm;
+    background: rgba(111,163,194,.10);
+    border: 1px solid rgba(61,107,142,.18);
+    font-size: 9pt; line-height: 1.5; color: var(--ink);
+    position: relative; word-break: keep-all;
+  }
+  .flow .step b { display: block; font-size: 10pt; color: var(--water-deep); margin-bottom: 1mm; }
+  .flow .step + .step { border-left: none; }
+  .flow .step:not(:last-child)::after {
+    content: "→"; position: absolute; right: -3.2mm; top: 50%; transform: translateY(-50%);
+    color: var(--sun); font-weight: 700; font-size: 11pt; z-index: 2;
+  }
+
+  /* —— 表格 —— */
+  table.tea {
+    width: 100%; border-collapse: collapse; font-size: 9.6pt;
+    margin: 1.5mm 0 2mm;
+  }
+  table.tea th {
+    text-align: left; font-size: 9.8pt; color: var(--cream);
+    background: var(--water-deep); padding: 2.2mm 3mm; font-weight: 700; letter-spacing: 1px;
+  }
+  table.tea th:first-child { border-radius: 8px 0 0 8px; }
+  table.tea th:last-child { border-radius: 0 8px 8px 0; }
+  table.tea td { padding: 1.7mm 3mm; border-bottom: 1px solid rgba(61,107,142,.12); color: var(--ink); line-height: 1.55; }
+  table.tea tr:nth-child(even) td { background: rgba(111,163,194,.06); }
+
+  /* —— 页脚 —— */
+  .foot {
+    position: absolute; left: 17mm; right: 17mm; bottom: 8mm;
+    display: flex; justify-content: space-between; align-items: center;
+    font-size: 8.5pt; color: var(--ink-soft); letter-spacing: 2px;
+    border-top: 1px solid rgba(61,107,142,.14); padding-top: 2.4mm;
+  }
+  .foot .num { font-family: "Snell Roundhand", cursive; font-size: 12pt; color: var(--water-deep); letter-spacing: 0; }
+
+  /* ============ 封面 ============ */
+  .cover { background: #2e4d66; }
+  .cover .bg { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: cover; }
+  .cover .scrim {
+    position: absolute; inset: 0;
+    background: linear-gradient(180deg, rgba(30,48,66,.28) 0%, rgba(30,48,66,.05) 34%, rgba(24,40,56,.62) 78%, rgba(20,34,48,.85) 100%);
+  }
+  .cover .topline {
+    position: absolute; top: 14mm; left: 17mm; right: 17mm;
+    display: flex; justify-content: space-between; align-items: baseline;
+    color: var(--cream);
+  }
+  .cover .topline .brand { font-family: "Snell Roundhand", cursive; font-size: 17pt; letter-spacing: 2px; }
+  .cover .topline .date { font-size: 10pt; letter-spacing: 4px; opacity: .85; }
+  .cover .hero { position: absolute; left: 17mm; right: 17mm; bottom: 20mm; color: var(--cream); }
+  .cover .hero .title-zh {
+    font-family: "Songti SC", serif; font-weight: 900;
+    font-size: 52pt; letter-spacing: 8px; line-height: 1.18;
+    text-shadow: 0 2px 18px rgba(20,34,48,.55);
+  }
+  .cover .hero .title-en {
+    font-family: "Snell Roundhand", cursive;
+    font-size: 30pt; color: var(--sun); margin: 1mm 0 3mm;
+  }
+  .cover .hero .slogan { font-size: 13.5pt; letter-spacing: 5px; opacity: .94; margin-bottom: 6mm; }
+  .cover .summary {
+    background: rgba(242,234,216,.14);
+    border-left: 3px solid var(--sun);
+    border-radius: 0 10px 10px 0;
+    padding: 4mm 5mm; font-size: 10.5pt; line-height: 1.85;
+    backdrop-filter: none;
+  }
+
+  /* 备用小图 */
+  .duo { display: flex; gap: 4.5mm; }
+  .duo .card { flex: 1; }
+
+  .note {
+    font-size: 8.8pt; color: var(--ink-soft); line-height: 1.7;
+    border-left: 2.5px solid var(--lily); padding-left: 3.5mm; margin-top: 3mm;
+  }
+  .steps-quick { counter-reset: q; }
+  .steps-quick .q { display: flex; gap: 3mm; margin: 1.5mm 0; align-items: baseline; }
+  .steps-quick .q::before {
+    counter-increment: q; content: counter(q);
+    font-family: "Snell Roundhand", cursive; font-size: 15pt; color: var(--sun);
+    min-width: 6mm; text-align: center; flex: none;
+  }
+  .steps-quick .q p { font-size: 9.8pt; line-height: 1.65; margin: 0; }
+  code.k {
+    font-family: "Songti SC", serif; background: rgba(111,163,194,.16);
+    border-radius: 4px; padding: 0 1.5mm; font-size: 9.2pt;
+  }
+</style>
+</head>
+<body>
+
+<!-- ================= 封面 ================= -->
+<div class="page cover">
+  <img class="bg" src="img/cover.jpg" alt="">
+  <div class="scrim"></div>
+  <div class="topline">
+    <span class="brand">Lumen</span>
+    <span class="date">二〇二六 · 秋</span>
+  </div>
+  <div class="hero">
+    <div class="title-zh">让光为你做事</div>
+    <div class="title-en">Lumen · Personal Agent</div>
+    <div class="slogan">印 象 派 的 私 人 A I 代 理 · 功 能 全 集</div>
+    <div class="summary">
+      Lumen 是一个原创开源的私人 AI 代理：不只回答问题，而是替你把事情办成——联网研究、文件生成、
+      电脑操作、七乘二十四小时监控、长期记忆与十项内置技能，运行在你自己的设备上，数据不出本机。
+      本册即它的完整功能图录。
+    </div>
+  </div>
+</div>
+
+<!-- ================= 壹 · 它是什么 ================= -->
+<div class="page">
+  <div class="inner">
+    <div class="kicker">I. <span class="zh">它是什么</span></div>
+    <h1 class="sec">壹 · 一位替你办事的代理</h1>
+    <div class="rule"></div>
+    <p class="sec-sub">
+      与聊天机器人的分野在于：旧式助手帮你「想和答」，Lumen 帮你「做」。你给出目标，它自主拆解任务、
+      联网取证、生成文件、操作电脑，在敏感节点把决定权交还给你——像一位私人助理，亲自去买回来再向你汇报。
+    </p>
+
+    <div class="cards">
+      <div class="card wide">
+        <h3>七个页面，一位代理<span class="en">Seven Rooms</span></h3>
+        <div class="cards" style="margin-top:2mm">
+          <div class="card"><h3>聊天<span class="en">Chat</span></h3><p>主入口。任务分解活动卡、虚拟浏览器小剧场、流式回答，可中断、可并行多个任务。</p></div>
+          <div class="card"><h3>动态<span class="en">For You</span></h3><p>兴趣自选的简报流：每日简报、可一键委托的资讯卡、监控命中提醒、成果回顾。</p></div>
+          <div class="card"><h3>灵感<span class="en">Ideas</span></h3><p>十五张点子卡（效率、生活、创作、学习、理财），点击即作为任务发给代理。</p></div>
+          <div class="card"><h3>目标<span class="en">Goals</span></h3><p>从对话沉淀的长线目标：自动建档、拆步骤、跟进进度；底部是后台监控任务区。</p></div>
+          <div class="card"><h3>文件<span class="en">Files</span></h3><p>代理生成的真实产物：研究报告、日历事件、邮件草稿、即兴画作，皆可下载。</p></div>
+          <div class="card"><h3>记忆<span class="en">Memory</span></h3><p>它记住的关于你的一切：偏好、事实、关系、习惯——可查看、编辑、遗忘。</p></div>
+          <div class="card wide" style="flex:1 1 100%"><h3>技能<span class="en">Skills</span></h3><p>十项内置技能库：启停即生效，启用后作为代理的专业知识注入每一次对话；其中电脑操作技能可经本地桥真实驱动你的电脑。</p></div>
+        </div>
+      </div>
+      <div class="card">
+        <h3>它的身世<span class="en">Lineage</span></h3>
+        <p>产品包含五大导航页与一整套可信机制：任务审批、审计日志、
+        常驻任务、长期记忆一一对应；并在其上长出自己的枝叶——莫奈印象派视觉与本地优先的隐私立场。</p>
+      </div>
+      <div class="card">
+        <h3>如何运行<span class="en">To Run</span></h3>
+        <p>零依赖、零构建。一条命令 <code class="k">node server.js</code> 即得到本地网址
+        <code class="k">http://127.0.0.1:8787</code>：应用、模型反代、技能服务、电脑操作桥同源一体，
+        只监听本机，绝不出网。</p>
+      </div>
+    </div>
+
+    <div class="foot"><span>Lumen · 让光为你做事</span><span class="num">2</span></div>
+  </div>
+</div>
+
+<!-- ================= 贰 · 核心体验 ================= -->
+<div class="page">
+  <div class="inner">
+    <div class="kicker">II. <span class="zh">核心体验</span></div>
+    <h1 class="sec">贰 · 交付决定权在你</h1>
+    <div class="rule"></div>
+    <p class="sec-sub">Lumen 的每一次行动都看得见、管得住、查得到。</p>
+
+    <div class="card wide">
+      <h3>任务剧场<span class="en">The Task Theater</span>　<span class="tag">透明执行</span></h3>
+      <div class="flow">
+        <div class="step"><b>理解意图</b>识别八类任务</div>
+        <div class="step"><b>制定计划</b>拆解可见步骤</div>
+        <div class="step"><b>逐步执行</b>进度实时可见</div>
+        <div class="step"><b>交付结果</b>产物归档文件页</div>
+      </div>
+      <p style="margin-top:2mm">执行过程以活动卡呈现：每一步的状态、检索的关键词、正在阅读的网页地址，全部实时展示——代理在它的虚拟计算机上干活，你隔着玻璃看。</p>
+    </div>
+
+    <div class="duo" style="margin-top:4.5mm">
+      <div class="card">
+        <h3>关键动作审批<span class="en">Approval</span>　<span class="tag gold">人在环</span></h3>
+        <p>花钱、预订、对外发送、操作你的电脑——四类敏感动作执行前必须经你批准：</p>
+        <ul>
+          <li><b>允许一次</b>：仅此一回</li>
+          <li><b>总是允许</b>：此类操作此后自动放行</li>
+          <li><b>拒绝</b>：任务立刻停下，绝不先斩后奏</li>
+        </ul>
+        <p style="margin-top:1.5mm">自主程度三档可选：每次都问／仅敏感操作（推荐）／全自动（只记日志不弹窗）。</p>
+      </div>
+      <div class="card">
+        <h3>审计日志<span class="en">Audit Trail</span></h3>
+        <p>代理做过什么、凭什么做的、结果如何——每一步都留痕：检索了什么、批准了什么、生成了什么，
+        设置面板随时回查，可导出。</p>
+        <h3 style="margin-top:3mm">中断与并行<span class="en">Interrupt</span></h3>
+        <p>非回合制：不必等一件事做完，随时下达新任务（并行推进），也随时按停——连挂起中的审批卡都会一并妥处，不会卡死。</p>
+      </div>
+    </div>
+
+    <div class="card wide" style="margin-top:4.5mm">
+      <h3>切页不打断<span class="en">Background</span>　<span class="tag rose">后台继续</span></h3>
+      <p>浏览其他页面甚至切换应用，任务在后台继续执行；导航徽标与动态页会告诉你新的成果何时落成。</p>
+      <p style="margin-top:1.5mm">聊天页内亦然：研究进行到一半可以追加要求，审批卡挂着的同时先聊别的，回来时进度仍在向前——你从不必为一个任务守在原地。新成果落成时，聊天页徽标亮起、动态页同步生成回顾卡。</p>
+    </div>
+
+    <img class="band" src="img/band-noon.jpg" alt="">
+
+    <div class="foot"><span>Lumen · 让光为你做事</span><span class="num">3</span></div>
+  </div>
+</div>
+
+<!-- ================= 叁 · 真实能力 ================= -->
+<div class="page">
+  <div class="inner">
+    <div class="kicker">III. <span class="zh">真实能力</span></div>
+    <h1 class="sec">叁 · 不演给你看</h1>
+    <div class="rule"></div>
+    <p class="sec-sub">接入模型后，以下能力全部真实——检索是真的，文档是真的，日历与邮件是真的，鼠标也是真的。</p>
+
+    <div class="card wide">
+      <h3>联网研究管线<span class="en">Live Research</span>　<span class="tag">真实检索</span></h3>
+      <div class="flow">
+        <div class="step"><b>生成搜索词</b>提炼中英双语关键词</div>
+        <div class="step"><b>多引擎检索</b>三个引擎递进，广告过滤、相关度打分</div>
+        <div class="step"><b>阅读来源</b>抓取正文，提取证据</div>
+        <div class="step"><b>引证作答</b>标注来源编号，查不到就明说</div>
+      </div>
+      <p style="margin-top:2mm">证据皆带来源编号，说话有出处；三十分钟查询缓存，对公共搜索引擎温柔以待。</p>
+    </div>
+
+    <div class="duo" style="margin-top:3.5mm">
+      <div class="card">
+        <h3>真实产物<span class="en">Artifacts</span></h3>
+        <ul>
+          <li><b>研究报告</b>——模型回答全文，含真实来源链接，存为文档</li>
+          <li><b>日历事件</b>——标准 <code class="k">.ics</code>，下载双击即入系统日历</li>
+          <li><b>邮件草稿</b>——标准 <code class="k">.eml</code>，导入邮件客户端可编辑发送</li>
+          <li><b>即兴画作</b>——本地印象派点彩，每幅仅此一张</li>
+        </ul>
+      </div>
+      <div class="card">
+        <h3>电脑操作<span class="en">Computer Use</span>　<span class="tag gold">逐步请示</span></h3>
+        <div class="flow" style="margin:2mm 0 1.5mm">
+          <div class="step"><b>观察</b>无障碍树</div>
+          <div class="step"><b>规划</b>模型定动作</div>
+          <div class="step"><b>批准</b>由你放行</div>
+          <div class="step"><b>执行</b>真实点击</div>
+        </div>
+        <p>基于 QCU 技能：以无障碍引用定位控件而非截图坐标，动作可验证、不盲点。演示模式只观察不动手。</p>
+      </div>
+    </div>
+
+    <div class="card wide" style="margin-top:3.5mm">
+      <h3>诚实清单<span class="en">Honest Edges</span></h3>
+      <p>不替你付款，不替你发送——最后一步永远由你完成，或让代理用电脑操作陪你走到下单页（每步仍会请示）。</p>
+      <ul>
+        <li>查无实据即坦言「未检索到」，绝不编造价格、库存与航班号</li>
+        <li>公共搜索引擎偶有限流，检索步骤如实标注「受限」，绝不假装成功</li>
+        <li>演示与真实两种模式，界面永远如实标注当前所在</li>
+      </ul>
+    </div>
+
+    <div class="foot"><span>Lumen · 让光为你做事</span><span class="num">4</span></div>
+  </div>
+</div>
+
+<!-- ================= 肆 · 常驻与记忆 ================= -->
+<div class="page">
+  <div class="inner">
+    <div class="kicker">IV. <span class="zh">常驻与记忆</span></div>
+    <h1 class="sec">肆 · 关掉页面，它还在</h1>
+    <div class="rule"></div>
+    <p class="sec-sub">「云端电脑」式的能力，在 Lumen 里由本地服务桥兑现——浏览器只是遥控器。</p>
+
+    <div class="card wide">
+      <h3>七乘二十四小时监控<span class="en">Always-On Watch</span>　<span class="tag rose">常驻任务</span></h3>
+      <p>说一句「帮我盯着机票降价、演出开票、申请开放」，代理便在服务桥注册常驻任务：</p>
+      <div class="flow" style="margin-top:2mm">
+        <div class="step"><b>注册</b>本地服务桥接管</div>
+        <div class="step"><b>巡检</b>定时真实检索</div>
+        <div class="step"><b>判断</b>模型识别命中</div>
+        <div class="step"><b>通报</b>命中卡即时生成</div>
+      </div>
+      <p style="margin-top:2mm">任务持久化在磁盘上——<b>关掉浏览器、合上笔记本再打开，它照常运转</b>。命中的动静出现在目标页监控区与动态页命中卡，节奏可暂停、可删除。</p>
+    </div>
+
+    <div class="duo" style="margin-top:4.5mm">
+      <div class="card">
+        <h3>长期记忆<span class="en">Memory</span></h3>
+        <p>每次对话后自动沉淀值得记住的偏好、事实、关系与习惯（自动去重），并注入之后每一次对话，越用越懂你。
+        记忆页里每一条都可<b>查看、编辑、遗忘</b>，也可手动记一条。你的记忆文件，主权在你。</p>
+      </div>
+      <div class="card">
+        <h3>个性化<span class="en">Persona</span></h3>
+        <p>名字随你起；三幅莫奈真迹头像任选；三种说话方式——温柔印象派、简洁高效、热心絮叨——
+        连朗读语速都会随之变化。</p>
+        <h3 style="margin-top:3mm">语音模式<span class="en">Voice</span></h3>
+        <p>输入：对着麦克风说，中文识别直达输入框。输出：可开启回复朗读。</p>
+      </div>
+    </div>
+
+    <div class="card wide" style="margin-top:4.5mm">
+      <h3>用量计<span class="en">Usage</span></h3>
+      <p>设置页内置用量统计，花销透明，心中有线：</p>
+      <ul>
+        <li><b>调用次数</b>——按日累计，今日多少一目了然</li>
+        <li><b>token 估算</b>——输入、输出、合计三口径，皆可回查</li>
+        <li><b>近七日条形图</b>——每日用量起伏，一眼看清</li>
+      </ul>
+    </div>
+
+    <img class="band" src="img/band-dusk.jpg" alt="">
+
+    <div class="foot"><span>Lumen · 让光为你做事</span><span class="num">5</span></div>
+  </div>
+</div>
+
+<!-- ================= 伍 · 技能·模型·上手 ================= -->
+<div class="page">
+  <div class="inner">
+    <div class="kicker">V. <span class="zh">技·模型·上手</span></div>
+    <h1 class="sec">伍 · 技能与模型</h1>
+    <div class="rule"></div>
+
+    <div class="card wide">
+      <h3>内置技能库<span class="en">Ten Skills</span></h3>
+      <table class="tea">
+        <tr><th style="width:22%">分类</th><th>技能</th></tr>
+        <tr><td>电脑操作</td><td>QCU 快速电脑操作（可执行：经本地桥真实驱动）</td></tr>
+        <tr><td>前端艺术</td><td>motion-skill-kit 动效片段库（本册的莫奈视觉即出自它）</td></tr>
+        <tr><td>学习研究</td><td>发现学习资源 · 构建知识关联 · 自适应学习手册 · 研究证据封装 · 学习指导编排 · 研究预算控制</td></tr>
+        <tr><td>审计</td><td>DeepSeek 集成合规审计</td></tr>
+        <tr><td>交付评审</td><td>Mirroria 交付辩论（对抗式评审）</td></tr>
+      </table>
+    </div>
+
+    <div class="card wide" style="margin-top:3.5mm">
+      <h3>多模型接入<span class="en">Any Model</span></h3>
+      <table class="tea">
+        <tr><th style="width:34%">通道</th><th>说明</th></tr>
+        <tr><td>ZCode 团队版（本地反代）</td><td>浏览器直连本机桥即可使用 GLM-5.3／5.3-flash；Anthropic 透传与 OpenAI 转译双协议，密钥现读现注入、只监听本机</td></tr>
+        <tr><td>直连服务商</td><td>OpenAI · Anthropic Claude · Google Gemini · 智谱 GLM · DeepSeek · Kimi · 通义千问</td></tr>
+        <tr><td>自定义</td><td>任意 OpenAI 兼容端点（填地址与模型名即用）</td></tr>
+      </table>
+      <p>流式输出，聊天页顶部的模型气泡一键切换；调用失败自动回落演示引擎，绝不白屏。</p>
+    </div>
+
+    <div class="duo" style="margin-top:3.5mm">
+      <div class="card">
+        <h3>三步上手<span class="en">Quick Start</span></h3>
+        <div class="steps-quick">
+          <div class="q"><p>终端运行 <code class="k">node server.js</code>，浏览器自动打开本地网址</p></div>
+          <div class="q"><p>设置里选「ZCode 团队版（本地反代）」，密钥随便填，点测试与启用</p></div>
+          <div class="q"><p>对它说「帮我查周五去京都的航班」，剩下的交给光</p></div>
+        </div>
+      </div>
+      <div class="card">
+        <h3>隐私立场<span class="en">Privacy</span></h3>
+        <p>对话、记忆、密钥、文件、审计——全部只存于你的设备。代理的每一个动作都有日志可查，
+        每一个敏感决定都由你亲手批准。</p>
+        <p style="margin-top:2mm; font-family:'Snell Roundhand',cursive; font-size:13pt; color:var(--water-deep)">Fait par la lumière — 由光而作</p>
+      </div>
+    </div>
+
+    <div style="margin-top:2.5mm; text-align:center; border-top:1px solid rgba(61,107,142,.14); padding-top:2mm">
+      <span style="font-family:'Snell Roundhand',cursive; font-size:14pt; color:var(--water-deep)">La lumière travaille pour vous — 让光为你做事</span>
+    </div>
+
+    <div class="foot"><span>Lumen · 让光为你做事</span><span class="num">6</span></div>
+  </div>
+</div>
+
+</body>
+</html>

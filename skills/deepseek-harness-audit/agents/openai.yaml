@@ -1,0 +1,4 @@
+interface:
+  display_name: "DeepSeek Harness Audit"
+  short_description: "审计 DeepSeek 协议、工具证据与公开执行轨迹"
+  default_prompt: "Use $deepseek-harness-audit to run a public-only DeepSeek tool and evidence audit."

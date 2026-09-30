@@ -1927,6 +1927,28 @@
       if (focus === "providers" && window.LumenAI.isReady(pid) === false && pid === "openai") card.classList.add("open");
       if (isActive) card.classList.add("open");
       sec2.appendChild(card);
+
+      // 本地网关卡片：实时探测网关状态，把环境变量里配置的模型直接亮出来
+      // （卡片状态显示「已就绪 · GLM-5.3」这类字样，一眼认出网关在跑什么模型）
+      if (pid === "localgw") {
+        fetch(bridgeBase() + "/v1/models").then(function (r) { return r.json(); }).then(function (d) {
+          var models = ((d && d.data) || []).map(function (m) { return m.id; });
+          if (!models.length) return;
+          var chipEl = card.querySelector(".pc-status");
+          if (chipEl) chipEl.textContent = (isActive ? "使用中 · " : "已就绪 · ") + models[0];
+          var dl = card.querySelector("datalist");
+          if (dl) models.forEach(function (mo) {
+            var op = document.createElement("option"); op.value = mo; dl.appendChild(op);
+          });
+          if (!userCfg.model) { // 用户还没填模型 → 自动带上网关模型
+            userCfg.model = models[0];
+            store.save();
+            var inp = card.querySelector('input[data-cfg="model"]');
+            if (inp) inp.value = models[0];
+            updateModelChip();
+          }
+        }).catch(function () {});
+      }
     });
     body.appendChild(sec2);
 

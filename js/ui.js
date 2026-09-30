@@ -1942,11 +1942,16 @@
           });
           if (!userCfg.model) { // 用户还没填模型 → 自动带上网关模型
             userCfg.model = models[0];
-            store.save();
             var inp = card.querySelector('input[data-cfg="model"]');
             if (inp) inp.value = models[0];
-            updateModelChip();
           }
+          if (!userCfg.apiKey) { // 网关不需要真实密钥（服务端注入）→ 占位自动填，扫清「请先填写」门槛
+            userCfg.apiKey = "local";
+            var kin = card.querySelector('input[data-cfg="apiKey"]');
+            if (kin) kin.value = "local";
+          }
+          store.save();
+          updateModelChip();
         }).catch(function () {});
       }
     });

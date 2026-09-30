@@ -1382,13 +1382,23 @@ function waitApproval(t) {
   });
 }
 
-async function dtaskModel(prompt) {
+async function dtaskModel(prompt, shotPath) {
   if (!serverModelReady()) return { error: "服务端模型未配置（环境变量 LUMEN_MODEL_API_KEY / LUMEN_MODEL_BASE），桌面任务需要它驱动" };
+  // 视觉观察：把最近桌面截图一并交给模型（Canvas/WebGL 游戏没有 DOM 元素，只能看画面）
+  let content = [{ type: "text", text: prompt }];
+  if (shotPath) {
+    try {
+      const buf = fs.readFileSync(shotPath);
+      if (buf.length > 0 && buf.length < 3 * 1024 * 1024) {
+        content.unshift({ type: "image", source: { type: "base64", media_type: "image/png", data: buf.toString("base64") } });
+      }
+    } catch (e) {}
+  }
   const body = JSON.stringify({
     model: MODEL_NAME,
     max_tokens: 4096, // 思考型模型：推理计入输出配额，太低会把 JSON 正文截空
-    system: "你是 LumenBox 桌面虚拟机的操作规划器。你在自己的隔离虚拟机里操作真实浏览器（用户可实时观看）。思考要短，最终只输出一个 JSON 动作，不要任何多余文字。",
-    messages: [{ role: "user", content: prompt }],
+    system: "你是 LumenBox 桌面虚拟机的操作规划器。你在自己的隔离虚拟机里操作真实浏览器（用户可实时观看）。你会同时收到：一张当前桌面截图 + 页面元素清单。画面内容以截图为准（很多游戏是纯 Canvas，元素清单为空时完全靠截图）。思考要短，最终只输出一个 JSON 动作，不要任何多余文字。",
+    messages: [{ role: "user", content: content }],
   });
   return new Promise(function (resolve) {
     const upReq = upstreamRequest(body, function (upRes) {
@@ -1472,15 +1482,15 @@ async function runDesktopTask(t) {
       '{"op":"click","args":{"n":1},"why":"…"} 点击第 n 个元素',
       '{"op":"fill","args":{"n":2,"text":"要输入的文本"},"why":"…"} 往第 n 个元素输入文本（敏感信息禁止写明文，用 secret）',
       '{"op":"fill","args":{"n":2,"secret":"安全区凭证名"},"why":"…"} 获批后由服务桥把凭证值直接注入该字段（你不知道值）',
-      '{"op":"key","args":{"key":"Return 或 Escape 或 alt+Left"},"why":"…"} 按键',
+      '{"op":"key","args":{"key":"Left/Right/Up/Down/Return/Escape/space/w/a/s/d 等"},"why":"…"} 按键（游戏操控主要靠它；截图里看到的操作提示照着按）',
       '{"op":"scroll","args":{"dy":600},"why":"…"} 滚动页面',
       '{"op":"read","args":{},"why":"…"} 读取当前页正文作为证据',
       '{"op":"tabnew","args":{},"why":"…"} / {"op":"tablist","args":{},"why":"…"} / {"op":"tabswitch","args":{"n":1},"why":"…"} 标签页',
       '{"op":"wait","args":{"ms":1500},"why":"…"} 等页面加载',
       '{"op":"done","args":{"summary":"一句话成果"},"why":"…"} 任务完成',
-      "规则：信息足够就 done；被 Sentinel 拒绝过的动作换路径；不要重复无效动作。",
+      "规则：信息足够就 done；被 Sentinel 拒绝过的动作换路径；不要重复无效动作；Canvas 游戏元素清单为空时，依据截图判断当前状态并用 key 动作操作。",
     ].join("\n");
-    const rep = await dtaskModel(prompt);
+    const rep = await dtaskModel(prompt, t.shot ? path.join(SHOT_DIR, t.shot) : null);
     if (rep.error) { dstep(t, "error", "模型调用失败：" + rep.error); break; }
     t.modelCalls = (t.modelCalls || 0) + 1;
     const m = String(rep.text || "").match(/\{[\s\S]*\}/);

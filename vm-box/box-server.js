@@ -284,7 +284,7 @@ async function actOn(body) {
     }
     case "key": {
       const k = String(args.key || "");
-      if (!/^[a-z0-9_+\-]+$/i.test(k)) throw new Error("按键名非法");
+      if (!/^[A-Za-z0-9_+\-]+$/i.test(k)) throw new Error("按键名非法");
       const r = await run("xdotool", ["key", "--", k]);
       await sleep(400);
       return { ok: r.ok, note: "key " + k };

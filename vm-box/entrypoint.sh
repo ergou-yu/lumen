@@ -14,7 +14,8 @@ websockify --web /usr/share/novnc 6901 localhost:5900 >/tmp/websockify.log 2>&1 
 # 私有卷跨容器复用，先清掉上个容器实例留下的 profile 锁（容器主机名每次都变）
 rm -f "$HOME/.config/chromium/Singleton"* 2>/dev/null || true
 chromium \
-  --no-sandbox --disable-dev-shm-usage --disable-gpu --disable-software-rasterizer \
+  --no-sandbox --disable-dev-shm-usage \
+  --enable-unsafe-swiftshader \
   --test-type --hide-crash-restore-bubble \
   --remote-debugging-port=9222 --remote-debugging-address=127.0.0.1 \
   --window-size=1280,780 --window-position=0,0 \

@@ -11,7 +11,7 @@ Lumen 是一个原创开源的私人 AI 代理：不只是聊天机器人，而�
 ```bash
 git clone https://github.com/ergou-yu/lumen.git
 cd lumen
-node server.js        # 一条命令：启动本地网址 + 模型反代 + 技能库 + QCU 桝始化
+node server.js        # 一条命令：启动本地网址 + 技能库 + 虚拟计算机桥
                        # 会自动打开浏览器；不想自动开：LUMEN_NO_OPEN=1 node server.js
 ```
 
@@ -20,18 +20,18 @@ node server.js        # 一条命令：启动本地网址 + 模型反代 + 技�
 | 可选组件 | 用途 | 开启方式 |
 |---|---|---|
 | Docker Desktop | LumenBox Desktop 桌面虚拟机（GUI 任务 + Live 画面） | 安装并启动 Docker 即可，首次启动自动构建镜像 |
-| ZCode 团队版 | 默认基础模型（本地反代注入密钥） | ZCode 登录团队版即可 |
+| 任意模型 API Key | 基础模型（六家厂商或自定义端点，自带 Key） | 设置 → 模型接入，填入你自己的 Key |
 | 任意 OpenAI 兼容 Key | 换用其他模型 | 设置 → 模型接入 |
 | qcu CLI | 「用我的电脑」真机操作流 | `pip install -e quick-computer-use` |
 
 > 克隆后无任何个人数据：工作区、凭证安全区、任务状态都是首次运行时自动生成的空文件。
 
-打开的就是本地网址 **http://127.0.0.1:8787** —— 应用、技能、电脑操作、模型反代全部同源，没有 CORS 顾虑。
+打开的就是本地网址 **http://127.0.0.1:8787** —— 应用、技能、电脑操作、虚拟计算机全部同源，没有 CORS 顾虑。
 
 - **不启动服务桥**也能用：直接双击 `index.html`（file://）进入演示模式；技能与 QCU 需要服务桥。
-- **启动后**：设置 → 「ZCode 团队版（本地反代）」→ API Key 随便填 → 模型 GLM-5.3 → 测试连接 → 启用。接口地址 `http://127.0.0.1:8787/v1`（带 `/v1`；服务桥也兼容不带 `/v1` 的旧配置）。
+- **启动后**：设置 → 模型接入 → 挑一家（OpenAI / Claude / Gemini / 智谱 / DeepSeek / Kimi / 通义 / 自定义 OpenAI 兼容端点）→ 填入**你自己的 API Key** → 测试连接 → 启用。也可以先用演示模式逛逛。
 - 换端口：`PORT=9000 node server.js`。诊断页：`/healthz`。
-- 注意：之前的 `python3 -m http.server` 方案已不需要——服务桥自己就是静态服务器，而且比它多出反代/技能/QCU 三样。
+- 注意：之前的 `python3 -m http.server` 方案已不需要——服务桥自己就是静态服务器，而且比它多出技能/QCU/虚拟计算机三样。
 
 ## 🗂 产品结构
 
@@ -141,7 +141,6 @@ qcu session start → observe（无障碍树）→ 模型规划动作 → 你批
 | Anthropic Claude | messages（已带浏览器直连头） | claude-sonnet-4 / claude-opus-4 |
 | Google Gemini | streamGenerateContent | gemini-2.0-flash |
 | Z.ai 智谱 GLM | OpenAI 兼容 | glm-4.7 / glm-4.7-flash |
-| **ZCode 团队版（本地反代）** | **双协议**：Anthropic 透传 ＋ OpenAI 自动转译（含流式） | **GLM-5.3 / GLM-5.3-flash** |
 | DeepSeek | OpenAI 兼容 | deepseek-chat / reasoner |
 | Moonshot Kimi | OpenAI 兼容 | kimi-k2 |
 | 阿里通义千问 | OpenAI 兼容 | qwen-max / plus |
@@ -149,29 +148,22 @@ qcu session start → observe（无障碍树）→ 模型规划动作 → 你批
 
 支持**流式输出**（SSE），可在聊天顶部的模型气泡中一键切换。
 
-### 🌊 用 ZCode 团队版给 Lumi 当基础模型（本地反代）
+### 🔌 服务端模型（可选，自带 Key）
 
-ZCode 团队订阅背后的模型网关（BigModel Coding Plan，Anthropic 兼容协议）不开放浏览器 CORS，直连会被拦。本目录自带一个**零依赖 Node 反代**（[server.js](server.js)）把它引到本机：
+聊天用的模型密钥**只存在你本机浏览器**（localStorage），浏览器直连各厂商。只有两类服务侧功能需要服务端也能调用模型——**桌面虚拟机任务**与**监控命中判断**。若需要，用环境变量提供你自己的密钥与端点（任意 Anthropic 兼容网关）：
 
 ```bash
-cd Lumen && node server.js
-# 🌊 Lumen · ZCode 团队版反代已启动 → http://127.0.0.1:8787
+LUMEN_MODEL_API_KEY=你的Key \
+LUMEN_MODEL_BASE=https://你的端点/api/anthropic \
+LUMEN_MODEL_NAME=模型名 \
+node server.js
 ```
 
-然后打开 Lumen → 设置 → **ZCode 团队版（本地反代）**：API Key 随便填一个非空值（真密钥由反代自动注入）、模型选 `GLM-5.3` → 测试连接 → 启用。
+- 未配置时：聊天与全部浏览功能照常（浏览器直连），桌面任务与监控智能判断优雅降级并如实提示。
+- 附赠通用本地网关：配置后 `http://127.0.0.1:8787/v1` 提供 Anthropic 透传 + OpenAI 协议转译——**你选的端点不支持浏览器 CORS 时**，在设置 → 模型接入 → 「本地网关」填这个地址即可接入（密钥走环境变量，不进页面）。
+- 密钥只来自环境变量：Lumen **不读取任何第三方工具的本地配置文件**。
 
-> 也支持 **OpenAI 型配置**：任何 OpenAI 兼容客户端（包括 Lumen 的 OpenAI 卡片）填接口地址 `http://127.0.0.1:8787` 或 `http://127.0.0.1:8787/v1`、模型 `GLM-5.3` 即可用——服务桥会把 OpenAI 协议自动转译成上游 Anthropic 协议（流式 SSE 双向转换，思考过程不外漏）。
-
-特性与边界：
-
-- **密钥现读现用**：反代每次请求都从 `~/.zcode/v2/config.json` 重新读取团队版密钥，ZCode 轮换密钥后无需重启反代。
-- **只监听 127.0.0.1**：订阅是你个人的，代理不出本机，局域网无法访问。
-- **纯透传**：Anthropic 协议原样转发，SSE 流直通；GLM-5.3 的思考过程（thinking_delta）不会漏进回答。
-- **思考型模型**：GLM-5.3 的推理计入输出配额，Lumen 已把 max_tokens 提到 8192 避免长回答被截断。
-- 浏览器打开 `http://127.0.0.1:8787` 有状态页，可随时自查密钥指纹与上游。
-- ⚠️ 提醒：团队版密钥是为 ZCode 产品签发的；这样接入属于个人在本地复用自己的订阅，请勿把代理暴露公网或分享给他人，也请注意计划条款与用量政策。
-
-> **CORS 小贴士**：个别服务商不允许 `file://` 或 `null` Origin 直连。若「测试连接」报网络错误，改用 `node server.js` 从 **http://127.0.0.1:8787** 打开即可（localhost Origin 通常放行；ZCode 团队版反代则完全同源，无此问题）。
+> **CORS 小贴士**：个别服务商不允许 `file://` 或 `null` Origin 直连。若「测试连接」报网络错误，改用 `node server.js` 从 **http://127.0.0.1:8787** 打开即可（localhost Origin 通常放行）。
 
 ## 🎨 莫奈印象派设计系统
 
@@ -196,7 +188,7 @@ Lumen/
 ├── index.html        # 应用骨架：七 Tab（聊天/动态/灵感/目标/文件/计算机/技能）+ 设置/查看器弹窗
 ├── vm-home/          # LumenBox 虚拟计算机工作区（Lumi 的文件囚于此目录）
 ├── vm-box/           # LumenBox Desktop 镜像（Dockerfile + 容器内控制服务：桌面/Chromium/VNC/输入注入）
-├── server.js         # 本地服务桥：模型反代 + 技能服务 + QCU 执行桥 + LumenBox 虚拟计算机（零依赖 Node）
+├── server.js         # 本地服务桥：网站伺服 + 服务端模型网关（环境变量自带 Key）+ 技能服务 + QCU 桥 + LumenBox 虚拟计算机（零依赖 Node）
 ├── assets/           # 莫奈真迹（头像/欢迎画，公有领域数字化图像）
 ├── skills/           # 内置技能库（10 个，每个含 SKILL.md）
 ├── css/
@@ -213,7 +205,7 @@ Lumen/
 
 ## 🧭 真实能力 vs 演示模式
 
-接入模型（推荐 ZCode 团队版反代）+ 服务桥在线时，以下能力**全部真实**：
+在设置里接入你自己的模型 Key + 服务桥在线时，以下能力**全部真实**：
 
 | 能力 | 真实形态 |
 |---|---|

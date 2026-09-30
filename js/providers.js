@@ -35,14 +35,16 @@
       baseUrl: "https://api.z.ai/api/paas/v4",
       models: ["glm-4.7", "glm-4.7-flash", "glm-4.6"],
     },
-    zcodeproxy: {
-      name: "ZCode 团队版（本地反代）",
+    localgw: {
+      name: "本地网关（server.js）",
       type: "anthropic",
+      // 适用场景：你选的模型端点不支持浏览器 CORS 时，经本目录 server.js 转发
+      //（需在启动服务桥时用环境变量提供你自己的密钥：LUMEN_MODEL_API_KEY / LUMEN_MODEL_BASE）
+      // baseUrl 留空 = 自动跟随当前页面源（同源服务桥，换端口也不用改配置）
       // Anthropic 协议约定：baseUrl 含 /v1，客户端只拼 /messages
-      baseUrl: "http://127.0.0.1:8787/v1",
-      // 需先启动本目录下的 server.js（node server.js）；
-      // API Key 由反代自动注入，这里随便填一个非空值即可
-      models: ["GLM-5.3", "GLM-5.3-flash"],
+      baseUrl: "",
+      // 密钥由服务端环境变量注入，这里随便填一个非空值即可
+      models: [],
     },
     deepseek: {
       name: "DeepSeek",
@@ -76,11 +78,17 @@
   function providerConfig(id) {
     var preset = PRESETS[id] || PRESETS.custom;
     var user = (store().settings.providers || {})[id] || {};
+    var base = (user.baseUrl !== undefined && user.baseUrl !== "") ? user.baseUrl : preset.baseUrl;
+    if (!base && id === "localgw") {
+      base = (location.protocol === "http:" || location.protocol === "https:")
+        ? location.origin + "/v1"
+        : "http://127.0.0.1:8787/v1";
+    }
     return {
       id: id,
       name: preset.name,
       type: preset.type,
-      baseUrl: (user.baseUrl !== undefined && user.baseUrl !== "") ? user.baseUrl : preset.baseUrl,
+      baseUrl: base,
       models: preset.models,
       apiKey: user.apiKey || "",
       model: user.model || (preset.models[0] || ""),
@@ -93,6 +101,19 @@
   }
 
   // 当前生效的模型（null = 演示模式）
+  // 旧版本预设名迁移（zcodeproxy → localgw）：老用户设置原样生效，无需重新配置
+  (function migrate() {
+    var st = store();
+    var provs = st.settings.providers || {};
+    if (provs.zcodeproxy && !provs.localgw) {
+      provs.localgw = { apiKey: provs.zcodeproxy.apiKey || "", model: provs.zcodeproxy.model || "" };
+      // 旧版绝对地址（127.0.0.1:8787）不迁移：新版自动跟随页面源，换端口零配置
+    }
+    if (st.settings.activeProvider === "zcodeproxy") st.settings.activeProvider = "localgw";
+    delete provs.zcodeproxy;
+    window.LumenStore.save();
+  })();
+
   function current() {
     var s = store().settings;
     if (!s.activeProvider || !isReady(s.activeProvider)) return null;

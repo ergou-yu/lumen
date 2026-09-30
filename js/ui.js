@@ -796,7 +796,7 @@
     box.innerHTML = "";
     if (!skillsData.online) {
       box.innerHTML =
-        '<div class="skills-offline">⚠ 尚未连接本地服务桥——技能库、电脑操作（QCU）与 ZCode 团队版模型反代都由它提供。<br>' +
+        '<div class="skills-offline">⚠ 尚未连接本地服务桥——技能库、电脑操作（QCU）与本地模型网关都由它提供。<br>' +
         "启动方法：在终端运行 <code>cd Lumen && node server.js</code>，它会自动打开 <code>http://127.0.0.1:8787</code>（或手动访问该网址）；也可以从本页刷新重试。<br>" +
         "未启动服务桥时，Lumi 仍可使用演示模式与其他直连模型。</div>";
       return;

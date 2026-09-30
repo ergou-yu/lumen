@@ -4,8 +4,10 @@
    ------------------------------------------------------------
   0) 网站伺服：http://127.0.0.1:8787 直接打开 Lumen 应用（同源，
      无 CORS 顾虑；启动时自动弹出浏览器）。
-  1) 模型反代：ZCode 团队版（BigModel Coding Plan）Anthropic 兼容网关
-     纯透传 + 密钥现读现注入 + SSE 直通；兼容 /messages 与 /v1/messages。
+  1) 服务端模型（可选，自带 Key）：通过环境变量接入任意 Anthropic 兼容端点
+     LUMEN_MODEL_API_KEY + LUMEN_MODEL_BASE (+ LUMEN_MODEL_NAME)，
+     仅供服务侧功能（桌面虚拟机任务、监控判断）使用；
+     聊天模型由用户在设置页自带 Key 浏览器直连，密钥只存本机浏览器。
   2) 技能服务：扫描 skills 目录下各技能的 SKILL.md，输出清单与全文。
   3) QCU 执行桥：POST /qcu/exec 受控执行本机 qcu CLI（observe/act/…），
      供 Lumi 的「电脑操作」能力使用。只绑 127.0.0.1，绝不出本机。
@@ -20,18 +22,16 @@
 const http = require("http");
 const https = require("https");
 const fs = require("fs");
-const os = require("os");
 const path = require("path");
 const { spawn, execFile } = require("child_process");
 
 const PORT = parseInt(process.env.PORT || "8787", 10);
 const HOST = "127.0.0.1"; // 只绑定本机回环，防止订阅与电脑被局域网访问
 const LUMEN_DIR = __dirname;
-const ZCODE_CONFIG = process.env.ZCODE_CONFIG ||
-  path.join(os.homedir(), ".zcode", "v2", "config.json");
-const ZCODE_BASE = (process.env.ZCODE_BASE ||
-  "https://open.bigmodel.cn/api/anthropic").replace(/\/+$/, "");
-const PLAN_PROVIDER_ID = "builtin:bigmodel-coding-plan";
+// 服务端模型（可选）：自带 Key，绝不读取任何第三方工具的本地配置
+const MODEL_KEY = process.env.LUMEN_MODEL_API_KEY || null;
+const MODEL_BASE = (process.env.LUMEN_MODEL_BASE || "").replace(/\/+$/, "");
+const MODEL_NAME = process.env.LUMEN_MODEL_NAME || "glm-4.7-flash";
 const SKILLS_DIR = path.join(LUMEN_DIR, "skills");
 const QCU_BIN = process.env.QCU_BIN || "qcu";
 const QCU_TIMEOUT_MS = parseInt(process.env.QCU_TIMEOUT_MS || "90000", 10);
@@ -51,26 +51,14 @@ const SKILL_META = {
   "mirroria-delivery-debate":  { category: "交付评审" },
 };
 
-// —— 每次请求现读密钥：ZCode 轮换 Key 后反代自动跟随 ——
-function loadApiKey() {
-  if (process.env.ZCODE_API_KEY) return process.env.ZCODE_API_KEY;
-  try {
-    const cfg = JSON.parse(fs.readFileSync(ZCODE_CONFIG, "utf8"));
-    const key = cfg &&
-      cfg.provider &&
-      cfg.provider[PLAN_PROVIDER_ID] &&
-      cfg.provider[PLAN_PROVIDER_ID].options &&
-      cfg.provider[PLAN_PROVIDER_ID].options.apiKey;
-    if (key && !String(key).startsWith("enc:")) return String(key);
-    return null;
-  } catch (e) {
-    return null;
-  }
+// 服务端模型是否就绪（需要 Key 与 Base 同时给出；未配置时相关功能优雅降级）
+function serverModelReady() {
+  return !!(MODEL_KEY && MODEL_BASE);
 }
-
-function keyFingerprint(k) {
-  if (!k) return "(未找到)";
-  return k.slice(0, 6) + "…" + k.slice(-4) + "（长度 " + k.length + "）";
+function serverModelHint() {
+  if (serverModelReady()) return "已配置（LUMEN_MODEL_API_KEY）";
+  if (MODEL_KEY && !MODEL_BASE) return "缺少 LUMEN_MODEL_BASE";
+  return "未配置（可选：桌面虚拟机任务需要，聊天不受影响）";
 }
 
 // —— CORS：Lumen 是浏览器页面（file:// 下 Origin 为 null），必须放行 ——
@@ -286,7 +274,7 @@ function oaiToAnthropic(body) {
   if (!merged.length) merged.push({ role: "user", content: " " });
   if (merged[0].role !== "user") merged.unshift({ role: "user", content: "（请开始）" });
   return {
-    model: body.model || "GLM-5.3",
+    model: body.model || MODEL_NAME,
     max_tokens: Math.min(body.max_tokens || 8192, 32768),
     temperature: body.temperature,
     system: system.join("\n\n") || undefined,
@@ -298,7 +286,7 @@ function oaiToAnthropic(body) {
 const STOP_MAP = { end_turn: "stop", stop_sequence: "stop", max_tokens: "length" };
 
 function upstreamRequest(upBody, onRespond) {
-  const upUrl = new URL(ZCODE_BASE + "/v1/messages");
+  const upUrl = new URL(MODEL_BASE + "/v1/messages");
   const upReq = https.request({
     hostname: upUrl.hostname,
     port: upUrl.port || 443,
@@ -307,7 +295,7 @@ function upstreamRequest(upBody, onRespond) {
     headers: {
       "Content-Type": "application/json",
       "Content-Length": Buffer.byteLength(upBody),
-      "x-api-key": loadApiKey() || "",
+      "x-api-key": MODEL_KEY || "",
       "anthropic-version": "2023-06-01",
     },
     timeout: 300000,
@@ -320,9 +308,8 @@ function handleChatCompletions(req, res, rawBody) {
   let body;
   try { body = JSON.parse(rawBody.toString("utf8")); }
   catch (e) { return json(res, 400, { error: { message: "请求体不是合法 JSON" } }); }
-  const key = loadApiKey();
-  if (!key) {
-    return json(res, 502, { error: { message: "未读取到团队版 API Key（请确认 ZCode 已登录团队版，或设 ZCODE_API_KEY）" } });
+  if (!serverModelReady()) {
+    return json(res, 502, { error: { message: "服务端模型未配置。请设置环境变量 LUMEN_MODEL_API_KEY 与 LUMEN_MODEL_BASE（自带 Key，任意 Anthropic 兼容端点）后重启服务桥。" } });
   }
   const upBody = JSON.stringify(oaiToAnthropic(body));
   const upReq = upstreamRequest(upBody, function (upRes) {
@@ -376,7 +363,7 @@ function handleChatCompletions(req, res, rawBody) {
       Connection: "keep-alive",
     }, CORS));
     const id = "chatcmpl-" + Date.now().toString(36);
-    const model = body.model || "GLM-5.3";
+    const model = body.model || MODEL_NAME;
     let started = false, finish = "stop";
     let buffer = "";
     function chunk(delta, finishReason) {
@@ -1300,10 +1287,9 @@ function waitApproval(t) {
 }
 
 async function dtaskModel(prompt) {
-  const key = loadApiKey();
-  if (!key) return { error: "未配置模型（ZCode 团队版密钥未就绪），桌面任务需要模型驱动" };
+  if (!serverModelReady()) return { error: "服务端模型未配置（环境变量 LUMEN_MODEL_API_KEY / LUMEN_MODEL_BASE），桌面任务需要它驱动" };
   const body = JSON.stringify({
-    model: "GLM-5.3",
+    model: MODEL_NAME,
     max_tokens: 4096, // 思考型模型：推理计入输出配额，太低会把 JSON 正文截空
     system: "你是 LumenBox 桌面虚拟机的操作规划器。你在自己的隔离虚拟机里操作真实浏览器（用户可实时观看）。思考要短，最终只输出一个 JSON 动作，不要任何多余文字。",
     messages: [{ role: "user", content: prompt }],
@@ -1576,7 +1562,7 @@ function taskPublic(t) {
 
 // 让上游模型判断：检索结果是否满足监控条件（模型不可用时退化为关键词包含判断）
 function judgeTaskHit(task, searchResults) {
-  const cfgReady = !!loadApiKey();
+  const cfgReady = serverModelReady();
   const listText = searchResults.map(function (r, i) {
     return "[" + (i + 1) + "] " + r.title + " — " + r.url + "\n    " + (r.snippet || "").slice(0, 180);
   }).join("\n");
@@ -1589,7 +1575,7 @@ function judgeTaskHit(task, searchResults) {
     return Promise.resolve({ hit: hit, summary: hit ? "关键词命中（未接模型，粗判）" : "无关键词命中", results: listText });
   }
   const body = JSON.stringify({
-    model: "GLM-5.3-flash",
+    model: MODEL_NAME,
     max_tokens: 600,
     system: "你是监控判断器。基于检索结果判断用户的监控条件是否满足。只输出 JSON：" +
       '{"hit":true或false,"summary":"一句话：发生了什么/为什么算命中（或没命中）"}',
@@ -1678,21 +1664,20 @@ const server = http.createServer(async function (req, res) {
 
   // —— 状态页（应用本体在 / ，这里只做诊断）——
   if (req.method === "GET" && (p === "/healthz" || p === "/bridge")) {
-    const key = loadApiKey();
     const skills = listSkills();
     res.writeHead(200, Object.assign({ "Content-Type": "text/html; charset=utf-8" }, CORS));
     return res.end(
       "<meta charset='utf-8'><body style=\"font-family:system-ui;max-width:600px;margin:60px auto;line-height:1.9\">" +
       "<h2>🌊 Lumen · 本地服务桥</h2>" +
-      "<p>模型反代：<b style='color:" + (key ? "#2e7d4f" : "#c0392b") + "'>" +
-      (key ? "就绪" : "未找到密钥（请确认 ZCode 已登录团队版）") + "</b> · 密钥指纹 " + keyFingerprint(key) + "</p>" +
-      "<p>双协议：Anthropic <code>/v1/messages</code>（透传）＋ OpenAI <code>/v1/chat/completions</code>（自动转译，含流式）</p>" +
+      "<p>服务端模型：<b style='color:" + (serverModelReady() ? "#2e7d4f" : "#9a6b1a") + "'>" + serverModelHint() + "</b>" +
+      (serverModelReady() ? " · 模型 <code>" + MODEL_NAME + "</code>" : "") + "</p>" +
+      "<p>聊天模型由用户在设置页自带 Key 浏览器直连（六家厂商 + 自定义端点）；不支持浏览器 CORS 的端点可经本地网关 <code>/v1</code> 接入（Anthropic 透传 + OpenAI 转译）。</p>" +
       "<p>技能库：" + skills.length + " 个已内置" +
       (skills.length ? "（" + skills.map(function (s) { return s.name; }).slice(0, 6).join("、") + (skills.length > 6 ? "…" : "") + "）" : "") + "</p>" +
       "<p>QCU 执行桥：POST /qcu/exec（qcu CLI 已在 PATH 中检测：" + (process.platform === "win32" ? "请自行确认" : "是") + "）</p>" +
       "<p>虚拟计算机 LumenBox：POST /vm/exec（browser/files/shell）· GET /vm/state · 工作区 <code>vm-home/</code>（终端" + (VM_SHELL_SERVER_ON ? "总闸开，仍需应用内开启" : "已被服务端禁用") + "）</p>" +
-      "<p>Lumen 设置 → ZCode 团队版（本地反代）：接口地址 <code>http://127.0.0.1:" + PORT + "/v1</code>，API Key 随便填，模型 <code>GLM-5.3</code>。</p>" +
-      "<hr><p style='color:#888;font-size:13px'>仅监听 127.0.0.1 · 密钥每次请求现读 " + ZCODE_CONFIG + "</p></body>"
+      "<p>本地网关接入（可选）：设置 → 模型接入 → 本地网关，接口地址 <code>http://127.0.0.1:" + PORT + "/v1</code>。</p>" +
+      "<hr><p style='color:#888;font-size:13px'>仅监听 127.0.0.1 · 密钥来自 LUMEN_MODEL_API_KEY 环境变量，Lumen 不读取任何第三方工具的本地配置</p></body>"
     );
   }
 
@@ -1717,8 +1702,7 @@ const server = http.createServer(async function (req, res) {
     return json(res, 200, {
       object: "list",
       data: [
-        { id: "GLM-5.3", object: "model", owned_by: "zcode-team-plan" },
-        { id: "GLM-5.3-flash", object: "model", owned_by: "zcode-team-plan" },
+        { id: MODEL_NAME, object: "model", owned_by: "lumen-local-gateway" },
       ],
     });
   }
@@ -1993,15 +1977,14 @@ const server = http.createServer(async function (req, res) {
   if (p.indexOf("/v1/") === 0 || p === "/v1") upstreamPath = p;
   else if (p === "/messages" || p === "/complete") upstreamPath = "/v1" + p;
   if (upstreamPath !== null) {
-    const key = loadApiKey();
-    if (!key) {
+    if (!serverModelReady()) {
       return json(res, 502, {
         type: "error",
-        error: { type: "proxy_error", message: "未能从 " + ZCODE_CONFIG + " 读取团队版 API Key。请确认 ZCode 已登录团队版，或用 ZCODE_API_KEY 环境变量显式提供。" },
+        error: { type: "proxy_error", message: "服务端模型未配置：请用环境变量 LUMEN_MODEL_API_KEY 与 LUMEN_MODEL_BASE 提供你自己的密钥与端点（自带 Key），然后重启服务桥。" },
       });
     }
     readBody(req, MAX_BODY).then(function (body) {
-      const upUrl = new URL(ZCODE_BASE + upstreamPath + u.search);
+      const upUrl = new URL(MODEL_BASE + upstreamPath + u.search);
       const upReq = https.request({
         hostname: upUrl.hostname,
         port: upUrl.port || 443,
@@ -2010,7 +1993,7 @@ const server = http.createServer(async function (req, res) {
         headers: {
           "Content-Type": "application/json",
           "Content-Length": body.length,
-          "x-api-key": key, // 真正的密钥在这里注入
+          "x-api-key": MODEL_KEY, // 密钥来自环境变量（用户自带）
           "anthropic-version": req.headers["anthropic-version"] || "2023-06-01",
         },
         timeout: 300000,
@@ -2039,18 +2022,17 @@ const server = http.createServer(async function (req, res) {
 });
 
 server.listen(PORT, HOST, function () {
-  const key = loadApiKey();
   const url = "http://" + HOST + ":" + PORT + "/";
   console.log("🌊 Lumen · 本地服务桥 v3 已启动");
   console.log("   应用网址 " + url + "（浏览器打开即用）");
-  console.log("   模型反代 http://" + HOST + ":" + PORT + "/v1 → " + ZCODE_BASE);
-  console.log("   双协议   Anthropic: /v1/messages（透传）· OpenAI: /v1/chat/completions（转译）");
-  console.log("   密钥     " + keyFingerprint(key));
+  console.log("   服务端模型 " + serverModelHint());
+  if (serverModelReady()) {
+    console.log("   本地网关 http://" + HOST + ":" + PORT + "/v1 → " + MODEL_BASE + "（Anthropic 透传 + OpenAI 转译）");
+  }
   console.log("   技能库   " + listSkills().length + " 个内置（" + SKILLS_DIR + "）");
   console.log("   QCU 桥   POST /qcu/exec → " + QCU_BIN + "（超时 " + QCU_TIMEOUT_MS + "ms）");
   console.log("   虚拟计算机 LumenBox · /vm/exec /vm/state · 工作区 vm-home/（浏览优先在这里，不碰你的电脑）");
   console.log("   诊断页   http://" + HOST + ":" + PORT + "/healthz");
-  if (!key) console.log("   ⚠ 未读到密钥：请先在 ZCode 登录团队版，或设 ZCODE_API_KEY");
   console.log("   停止     Ctrl+C");
   // 自动弹出浏览器（不想弹：LUMEN_NO_OPEN=1 node server.js）
   if (!process.env.LUMEN_NO_OPEN) {

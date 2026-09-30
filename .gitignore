@@ -23,3 +23,6 @@ __pycache__/
 # 宣传册渲染产物（由 lumen-brochure.html 导出，不入库）
 docs/brochure/*.pdf
 docs/brochure/page-*.png
+
+# 个人启动器（本机专用，不入库）
+run.sh

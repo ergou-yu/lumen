@@ -2278,6 +2278,17 @@
     document.addEventListener("keydown", function (e) {
       if (e.key === "Escape") { closeSettings(); closeViewer(); closePopover(); }
     });
+    // 弹窗滚轮死区修复：鼠标悬停在标题栏/卡片间隙时，滚轮转发给正文滚动区
+    // （此前可滚动区只有 modal-body，指针落在弹窗其他位置时滚轮毫无反应）
+    document.querySelectorAll(".modal-card").forEach(function (card) {
+      card.addEventListener("wheel", function (e) {
+        var body = card.querySelector(".modal-body");
+        if (!body || body.contains(e.target)) return; // 在正文上：浏览器原生处理
+        var max = body.scrollHeight - body.clientHeight;
+        if (max <= 0) return;
+        body.scrollTop = Math.max(0, Math.min(max, body.scrollTop + e.deltaY));
+      }, { passive: true });
+    });
   }
 
   // ———————————————————————————— 启动 ————————————————————————————

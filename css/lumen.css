@@ -746,7 +746,16 @@ svg.ico { width: 20px; height: 20px; fill: none; stroke: currentColor; stroke-wi
   border-bottom: 1px solid var(--line-soft);
 }
 .modal-head h2 { font-family: var(--font-display); font-size: 20px; font-weight: 500; }
-.modal-body { padding: 22px 24px 28px; overflow-y: auto; }
+.modal-body { padding: 22px 24px 28px; overflow-y: auto; overscroll-behavior: contain; }
+
+/* 滚动条常显化：macOS 覆盖式滚动条平时不可见，容易被误以为「滚不动」 */
+.modal-body::-webkit-scrollbar, #chat-scroll::-webkit-scrollbar, .audit-list::-webkit-scrollbar,
+.vm-page-body::-webkit-scrollbar, .vm-term-log::-webkit-scrollbar { width: 8px; }
+.modal-body::-webkit-scrollbar-thumb, #chat-scroll::-webkit-scrollbar-thumb, .audit-list::-webkit-scrollbar-thumb,
+.vm-page-body::-webkit-scrollbar-thumb, .vm-term-log::-webkit-scrollbar-thumb {
+  background: rgba(61, 107, 142, 0.28); border-radius: 4px;
+}
+.modal-body::-webkit-scrollbar-thumb:hover { background: rgba(61, 107, 142, 0.45); }
 
 .set-section { margin-bottom: 26px; }
 .set-section h3 {

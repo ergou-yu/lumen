@@ -735,6 +735,51 @@
       .catch(function (e) { return { ok: false, error: String(e && e.message || e) }; });
   }
 
+  // —— 版本与更新（有新版本只提示；一键更新必须用户点击，绝不静默执行） ——
+  var updateState = { checking: false, data: null };
+
+  function checkForUpdates(silent) {
+    if (updateState.checking) return Promise.resolve();
+    updateState.checking = true;
+    return fetch(bridgeBase() + "/update/check")
+      .then(function (r) { return r.json(); })
+      .then(function (d) {
+        updateState.checking = false;
+        updateState.data = d;
+        if (!silent && d && d.ok !== false) {
+          if (d.updateAvailable) {
+            var n = d.behind || (d.commits || []).length;
+            toast("✨ 有新版本（落后 " + n + " 个提交）：设置 → 更新 可一键更新");
+          } else toast("已是最新版本 ✓");
+        }
+        return d;
+      })
+      .catch(function () { updateState.checking = false; if (!silent) toast("检查更新失败（服务桥离线？）"); });
+  }
+
+  function applyUpdate() {
+    var d = updateState.data || {};
+    var summary = (d.commits || []).slice(0, 8).map(function (c, i) { return (i + 1) + ". " + c; }).join("\n");
+    if (!window.confirm("立即更新？将执行 git pull --ff-only 获取最新版本，更新完成后需要重启服务桥。\n\n本次更新内容：\n" + (summary || "（无详细列表）"))) return;
+    toast("正在拉取最新版本…");
+    fetch(bridgeBase() + "/update/apply", { method: "POST", headers: { "Content-Type": "application/json" }, body: "{}" })
+      .then(function (r) { return r.json(); })
+      .then(function (res) {
+        if (res && res.ok) {
+          store.audit("一键更新", "已更新到 " + res.nowAt, "done");
+          openDoc("更新完成 🎉", res.note);
+          toast("已更新到最新，请重启服务桥后刷新页面");
+        } else {
+          store.audit("一键更新被拒", String(res && res.error || "").slice(0, 80), "info");
+          openDoc("更新未执行", (res && res.error || "未知原因") +
+            ((res && res.dirty) ? "\n\n本地改动文件（示例）：\n" + res.dirty.join("\n") : "") +
+            "\n\n可手动执行：git stash && git pull --ff-only origin main");
+        }
+        checkForUpdates(true);
+      })
+      .catch(function () { toast("更新请求失败（服务桥离线？）"); });
+  }
+
   function probeDesktop() {
     desktopApi("/vm/desktop/status").then(function (st) {
       if (st && st.ok !== false) {
@@ -1784,6 +1829,59 @@
     var s = store.state.settings;
 
     // —— 代理身份 ——
+    // —— 版本与更新 ——
+    var secUp = el("div", "set-section");
+    secUp.appendChild(el("h3", "", "更新 · 版本与一键升级"));
+    var upBox = el("div");
+    upBox.style.cssText = "font-size:13px;color:var(--ink-soft);line-height:1.8";
+    secUp.appendChild(upBox);
+    var upBtns = el("div", "set-row");
+    var reCheck = el("button", "chip", "检查更新");
+    reCheck.type = "button";
+    reCheck.addEventListener("click", function () { checkForUpdates(false); renderUpdateSection(); });
+    upBtns.appendChild(reCheck);
+    if (updateState.data && updateState.data.updateAvailable) {
+      var applyBtn = el("button", "chip allow", "立即更新（git pull）");
+      applyBtn.type = "button";
+      applyBtn.addEventListener("click", applyUpdate);
+      upBtns.appendChild(applyBtn);
+      if (updateState.data.mode === "download") {
+        var dl = el("a", "chip", "前往 GitHub 下载新版");
+        dl.href = "https://github.com/" + updateState.data.repo + "/releases";
+        dl.target = "_blank";
+        dl.rel = "noopener";
+        upBtns.appendChild(dl);
+      }
+    }
+    secUp.appendChild(upBtns);
+    function renderUpdateSection() {
+      var d = updateState.data;
+      var lines = [];
+      if (!d) {
+        lines.push("点「检查更新」获取版本信息");
+      } else {
+        lines.push("当前版本 v" + (d.local && d.local.version || "?") +
+          (d.local && d.local.sha ? "（" + d.local.sha + "）" : "") +
+          (d.mode === "download" ? " · ZIP 安装" : " · git 克隆") +
+          (d.dirty ? " · <b style='color:#9a6b1a'>本地有未提交改动，一键更新会被拒绝</b>" : ""));
+        if (d.updateAvailable) {
+          var n = d.behind || (d.commits || []).length;
+          lines.push("<b style='color:#47724f'>✨ 有新版本：落后 " + n + " 个提交</b>");
+          if (d.commits && d.commits.length) {
+            lines.push('<div style="max-height:140px;overflow:auto;border:1px solid var(--line-soft);border-radius:8px;padding:8px 12px;margin-top:6px;font-size:12.5px">' +
+              d.commits.map(function (c) { return "· " + esc(c); }).join("<br>") + "</div>");
+          }
+        } else {
+          lines.push("✓ 已是最新版本");
+        }
+        if (d.note) lines.push('<span style="font-size:12px;color:var(--ink-faint)">' + esc(d.note) + "</span>");
+      }
+      upBox.innerHTML = lines.join("<br>");
+      // 按钮区随状态变化：交给下一次 renderSettings；此处先补一条说明
+    }
+    renderUpdateSection();
+    body.appendChild(secUp);
+
     var sec1 = el("div", "set-section");
     sec1.appendChild(el("h3", "", "代理身份"));
     var r1 = el("div", "set-row");
@@ -2334,6 +2432,12 @@
     updateStatus();
     updateBadges();
     loadSkills(); // 异步连接本地服务桥的技能库，失败则技能页显示引导
+    checkForUpdates(true).then(function () { // 静默检查；有新版本才提醒
+      var d = updateState.data;
+      if (d && d.updateAvailable) {
+        toast("✨ 有新版本（落后 " + (d.behind || (d.commits || []).length) + " 个提交）：设置 → 更新 可一键更新");
+      }
+    });
     window.addEventListener("lumen-save-failed", function () {
       toast("⚠️ 本地存储空间不足，最新数据可能未保存（可到文件页删除大画作）");
     });

@@ -136,6 +136,9 @@ svg.ico { width: 20px; height: 20px; fill: none; stroke: currentColor; stroke-wi
   overflow: hidden;
 }
 
+/* 非聊天页：内容超高时面板自身滚动（聊天页有自己的 #chat-scroll，保持原布局） */
+.panel:not(#panel-chat) { overflow-y: auto; overscroll-behavior: contain; }
+
 /* fade-slide-route：Tab 切换淡入上滑（低开销合成器动画） */
 @keyframes route-enter {
   from { opacity: 0; transform: translateY(24px); filter: blur(6px); }

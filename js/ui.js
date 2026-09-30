@@ -736,15 +736,21 @@
   }
 
   // —— 版本与更新（有新版本只提示；一键更新必须用户点击，绝不静默执行） ——
-  var updateState = { checking: false, data: null };
+  var updateState = { inflight: null, data: null };
 
   function checkForUpdates(silent) {
-    if (updateState.checking) return Promise.resolve();
-    updateState.checking = true;
-    return fetch(bridgeBase() + "/update/check")
+    if (updateState.inflight) return updateState.inflight; // 并发调用共享同一次检查
+    var p = (function waitForBridge() { // 页面刚加载时桥可能还没探测完（基址还是回退值），先等它
+      if (window.LumenBridgeBase === "") return Promise.resolve();
+      return new Promise(function (resolve) {
+        var n = 0;
+        var timer = setInterval(function () {
+          if (window.LumenBridgeBase === "" || ++n > 20) { clearInterval(timer); resolve(); }
+        }, 500);
+      });
+    })().then(function () { return fetch(bridgeBase() + "/update/check"); })
       .then(function (r) { return r.json(); })
       .then(function (d) {
-        updateState.checking = false;
         updateState.data = d;
         if (!silent && d && d.ok !== false) {
           if (d.updateAvailable) {
@@ -754,7 +760,9 @@
         }
         return d;
       })
-      .catch(function () { updateState.checking = false; if (!silent) toast("检查更新失败（服务桥离线？）"); });
+      .catch(function () { if (!silent) toast("检查更新失败（服务桥离线？）"); });
+    updateState.inflight = p.then(function () { updateState.inflight = null; }, function () { updateState.inflight = null; });
+    return updateState.inflight;
   }
 
   function applyUpdate() {
@@ -822,6 +830,12 @@
           skillsData.list = d.skills || [];
           window.LumenBridgeBase = base; // 探测成功，QCU 等后续调用走同一基址
           probeDesktop(); // 顺带探测桌面虚拟机（Docker）可用性，供 agent.js 选路
+          checkForUpdates(true).then(function () { // 静默检查更新；有新版本才提醒，绝不自动更新
+            var d = updateState.data;
+            if (d && d.updateAvailable) {
+              toast("✨ 有新版本（落后 " + (d.behind || (d.commits || []).length) + " 个提交）：设置 → 更新 可一键更新");
+            }
+          });
           skillsData.list.forEach(function (s) {
             if (skillEnabled(s.id)) fetchSkillContent(s.id).catch(function () {});
           });
@@ -2436,12 +2450,6 @@
     updateStatus();
     updateBadges();
     loadSkills(); // 异步连接本地服务桥的技能库，失败则技能页显示引导
-    checkForUpdates(true).then(function () { // 静默检查；有新版本才提醒
-      var d = updateState.data;
-      if (d && d.updateAvailable) {
-        toast("✨ 有新版本（落后 " + (d.behind || (d.commits || []).length) + " 个提交）：设置 → 更新 可一键更新");
-      }
-    });
     window.addEventListener("lumen-save-failed", function () {
       toast("⚠️ 本地存储空间不足，最新数据可能未保存（可到文件页删除大画作）");
     });

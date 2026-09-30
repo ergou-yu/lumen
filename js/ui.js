@@ -1928,13 +1928,24 @@
       if (isActive) card.classList.add("open");
       sec2.appendChild(card);
 
-      // 本地网关卡片：实时探测网关状态，把环境变量里配置的模型直接亮出来
-      // （卡片状态显示「已就绪 · GLM-5.3」这类字样，一眼认出网关在跑什么模型）
+      // 本地网关卡片：实时探测网关状态——配了环境变量才亮「已就绪 · 模型名」；
+      // 没配就如实显示「未配置」并给出配置方法，绝不误导启用
       if (pid === "localgw") {
         fetch(bridgeBase() + "/v1/models").then(function (r) { return r.json(); }).then(function (d) {
           var models = ((d && d.data) || []).map(function (m) { return m.id; });
-          if (!models.length) return;
           var chipEl = card.querySelector(".pc-status");
+          if (!models.length) {
+            if (chipEl) { chipEl.textContent = "未配置"; chipEl.className = "pc-status off"; }
+            var body = card.querySelector(".pc-body");
+            if (body && !body.querySelector(".localgw-hint")) {
+              var hint = el("div", "localgw-hint",
+                '<div style="font-size:12px;color:var(--ink-faint);line-height:1.8;margin-top:8px">网关需要服务端密钥：启动服务桥时设置环境变量，例如<br>' +
+                '<code>LUMEN_MODEL_API_KEY=你的Key LUMEN_MODEL_BASE=端点 node server.js</code><br>' +
+                "（任意 Anthropic 兼容端点；也可以不用本卡片，直接用上面各家厂商自带 Key 直连）</div>");
+              body.appendChild(hint);
+            }
+            return;
+          }
           if (chipEl) chipEl.textContent = (isActive ? "使用中 · " : "已就绪 · ") + models[0];
           var dl = card.querySelector("datalist");
           if (dl) models.forEach(function (mo) {

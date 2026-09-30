@@ -1697,10 +1697,16 @@ const server = http.createServer(async function (req, res) {
     return handleQcuExec(req, res);
   }
 
-  // —— 本地模型列表 ——
+  // —— 本地模型列表（如实上报：没配环境变量就返回空，前端据此显示「未配置」） ——
   if (req.method === "GET" && (p === "/v1/models" || p === "/models")) {
+    if (!serverModelReady()) {
+      return json(res, 200, {
+        object: "list", data: [], configured: false,
+        hint: "服务端模型未配置：启动服务桥时设置环境变量 LUMEN_MODEL_API_KEY 与 LUMEN_MODEL_BASE（自带 Key，任意 Anthropic 兼容端点）",
+      });
+    }
     return json(res, 200, {
-      object: "list",
+      object: "list", configured: true,
       data: [
         { id: MODEL_NAME, object: "model", owned_by: "lumen-local-gateway" },
       ],

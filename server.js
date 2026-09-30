@@ -1041,10 +1041,12 @@ async function updateApply() {
     return { ok: false, error: "git pull 失败（" + String(pull.err || pull.out || "").slice(0, 200) + "）。请手动执行 git pull 排查。" };
   }
   const after = await sh("git", ["rev-parse", "--short", "HEAD"], 8000);
+  let newVer = PKG.version;
+  try { newVer = JSON.parse(fs.readFileSync(path.join(LUMEN_DIR, "package.json"), "utf8")).version || PKG.version; } catch (e) {}
   return {
     ok: true,
     nowAt: after.out.trim(),
-    version: PKG.version,
+    version: newVer,
     note: "更新完成：请重启服务桥（Ctrl+C 停止后重新 node server.js）让新代码生效；浏览器随后刷新页面。",
   };
 }

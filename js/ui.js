@@ -1838,7 +1838,10 @@
     var upBtns = el("div", "set-row");
     var reCheck = el("button", "chip", "检查更新");
     reCheck.type = "button";
-    reCheck.addEventListener("click", function () { checkForUpdates(false); renderUpdateSection(); });
+    reCheck.addEventListener("click", function () {
+      reCheck.disabled = true;
+      checkForUpdates(false).then(function () { reCheck.disabled = false; renderUpdateSection(); });
+    });
     upBtns.appendChild(reCheck);
     if (updateState.data && updateState.data.updateAvailable) {
       var applyBtn = el("button", "chip allow", "立即更新（git pull）");
@@ -1880,6 +1883,7 @@
       // 按钮区随状态变化：交给下一次 renderSettings；此处先补一条说明
     }
     renderUpdateSection();
+    if (!updateState.data) checkForUpdates(true).then(renderUpdateSection); // 打开设置时静默补拉一次
     body.appendChild(secUp);
 
     var sec1 = el("div", "set-section");

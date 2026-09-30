@@ -962,15 +962,45 @@
       }
 
       // Live 画面（iframe 只创建一次，避免 noVNC 反复重连）
+      // 双模式：观看（默认，滚轮/点击穿透——页面正常滑）/ 接管（事件全部进虚拟机）
       if (st && st.state === "running" && st.novncUrl) {
         vmDeskNodes.liveWrap.hidden = false;
         if (!vmDeskNodes.liveWrap.querySelector("iframe")) {
-          var bar = el("div", "vm-live-bar", "实时画面（可接管：直接在画面里操作鼠标键盘）");
+          var bar = el("div", "vm-live-bar");
+          var hint = el("span", "vm-live-hint", "");
+          var modeBtn = el("button", "chip vm-live-mode", "");
+          modeBtn.type = "button";
+          function applyLiveMode(takeover) {
+            vmDeskNodes.liveWrap.classList.toggle("watch", !takeover);
+            modeBtn.textContent = takeover ? "🖱 接管中 · 点此退出" : "👀 观看模式 · 点我接管";
+            modeBtn.classList.toggle("on", takeover);
+            hint.textContent = takeover
+              ? "鼠标键盘/滚轮已进入虚拟机（远程操作中）"
+              : "观看模式：滚轮滑的是本页，点右侧按钮接管虚拟机";
+            try { localStorage.setItem("lumen-live-takeover", takeover ? "1" : "0"); } catch (e) {}
+          }
+          modeBtn.addEventListener("click", function () {
+            applyLiveMode(vmDeskNodes.liveWrap.classList.contains("watch"));
+          });
+          var reBtn = el("button", "chip", "重连画面");
+          reBtn.type = "button";
+          reBtn.title = "画面黑屏/卡住时重连 noVNC";
+          reBtn.addEventListener("click", function () {
+            var f = vmDeskNodes.liveWrap.querySelector("iframe");
+            if (f) f.src = f.src;
+            toast("正在重连实时画面…");
+          });
+          bar.appendChild(hint);
+          bar.appendChild(modeBtn);
+          bar.appendChild(reBtn);
+          vmDeskNodes.liveWrap.appendChild(bar);
           var frame = document.createElement("iframe");
           frame.src = st.novncUrl;
           frame.setAttribute("allow", "clipboard-read; clipboard-write");
-          vmDeskNodes.liveWrap.appendChild(bar);
           vmDeskNodes.liveWrap.appendChild(frame);
+          var savedTakeover = false;
+          try { savedTakeover = localStorage.getItem("lumen-live-takeover") === "1"; } catch (e) {}
+          applyLiveMode(savedTakeover);
         }
       } else {
         vmDeskNodes.liveWrap.hidden = true;

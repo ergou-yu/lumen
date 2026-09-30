@@ -116,6 +116,23 @@ svg.ico { width: 20px; height: 20px; fill: none; stroke: currentColor; stroke-wi
   border-radius: 10px; font-size: 11px; font-weight: 700;
 }
 .side-foot { border-top: 1px solid var(--line-soft); padding-top: 10px; }
+
+/* 侧栏底部版本行：常态低调灰字；有新版时亮起成可点的更新提示条 */
+.side-ver {
+  display: block; width: 100%; margin-top: 8px; padding: 4px 10px;
+  border: 0; border-radius: 8px; background: transparent; cursor: pointer;
+  font-size: 11px; color: var(--ink-faint); text-align: left;
+  font-family: ui-monospace, Menlo, monospace;
+  transition: background 0.25s, color 0.25s;
+}
+.side-ver:hover { background: rgba(111,163,194,0.14); color: var(--ink-soft); }
+.side-ver.up {
+  color: #47724f; font-weight: 700;
+  background: linear-gradient(120deg, rgba(109,158,119,0.16), rgba(232,176,75,0.14));
+  animation: ver-pulse 2.4s ease-in-out infinite;
+}
+.side-ver.up:hover { background: rgba(109,158,119,0.24); }
+@keyframes ver-pulse { 0%,100% { box-shadow: 0 0 0 0 rgba(109,158,119,0.0);} 50% { box-shadow: 0 0 0 3px rgba(109,158,119,0.14);} }
 .side-note {
   padding: 10px 8px 2px;
   font-size: 12px; color: var(--ink-faint);

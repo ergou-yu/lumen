@@ -738,6 +738,29 @@
   // —— 版本与更新（有新版本只提示；一键更新必须用户点击，绝不静默执行） ——
   var updateState = { inflight: null, data: null };
 
+  function renderSideVersion() {
+    var btn = document.querySelector("#side-ver");
+    if (!btn) return;
+    var d = updateState.data;
+    if (!d || !d.local) {
+      btn.textContent = "v…";
+      btn.className = "side-ver";
+      btn.title = "检查版本中…";
+      return;
+    }
+    var v = d.local.version || "?";
+    if (d.updateAvailable) {
+      var n = d.behind || (d.commits || []).length;
+      btn.textContent = "✨ v" + v + " · 有新版（+" + n + "）";
+      btn.className = "side-ver up";
+      btn.title = "落后 " + n + " 个提交，点击查看并一键更新";
+    } else {
+      btn.textContent = "v" + v + (d.local.sha ? " · " + d.local.sha.slice(0, 7) : "");
+      btn.className = "side-ver";
+      btn.title = "已是最新版本（点击查看更新详情）";
+    }
+  }
+
   function checkForUpdates(silent) {
     if (updateState.inflight) return updateState.inflight; // 并发调用共享同一次检查
     var p = (function waitForBridge() { // 页面刚加载时桥可能还没探测完（基址还是回退值），先等它
@@ -752,6 +775,7 @@
       .then(function (r) { return r.json(); })
       .then(function (d) {
         updateState.data = d;
+        renderSideVersion();
         if (!silent && d && d.ok !== false) {
           if (d.updateAvailable) {
             var n = d.behind || (d.commits || []).length;
@@ -831,6 +855,7 @@
           window.LumenBridgeBase = base; // 探测成功，QCU 等后续调用走同一基址
           probeDesktop(); // 顺带探测桌面虚拟机（Docker）可用性，供 agent.js 选路
           checkForUpdates(true).then(function () { // 静默检查更新；有新版本才提醒，绝不自动更新
+            renderSideVersion();
             var d = updateState.data;
             if (d && d.updateAvailable) {
               toast("✨ 有新版本（落后 " + (d.behind || (d.commits || []).length) + " 个提交）：设置 → 更新 可一键更新");
@@ -1897,7 +1922,7 @@
       // 按钮区随状态变化：交给下一次 renderSettings；此处先补一条说明
     }
     renderUpdateSection();
-    if (!updateState.data) checkForUpdates(true).then(renderUpdateSection); // 打开设置时静默补拉一次
+    if (!updateState.data) checkForUpdates(true).then(function () { renderUpdateSection(); renderSideVersion(); }); // 打开设置时静默补拉一次
     body.appendChild(secUp);
 
     var sec1 = el("div", "set-section");
@@ -2410,6 +2435,8 @@
       var pop = $("#model-popover");
       if (pop.hidden) renderHistoryPopover(); else closePopover();
     });
+    var sideVer = document.querySelector("#side-ver");
+    if (sideVer) sideVer.addEventListener("click", function () { openSettings(); });
     $("#btn-add-goal").addEventListener("click", openAddGoal);
     $("#btn-add-memory").addEventListener("click", openAddMemory);
     var vmRefresh = $("#btn-vm-refresh");

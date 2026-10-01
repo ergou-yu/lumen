@@ -28,6 +28,8 @@ const fs = require("fs");
 const path = require("path");
 const { spawn, execFile } = require("child_process");
 const os = require("os");
+const net = require("net");
+const tls = require("tls");
 
 const PORT = parseInt(process.env.PORT || "8787", 10);
 // 默认只绑本机回环；手机等同网段设备访问请用 LUMEN_HOST=0.0.0.0 启动（详见 README「手机访问」）
@@ -2223,7 +2225,7 @@ const server = http.createServer(async function (req, res) {
   const MUTATING_BOX_ROUTES = new Set([
     "/vm/desktop/start", "/vm/desktop/stop", "/vm/desktop/build", "/vm/desktop/act",
     "/sentinel/decide", "/vm/vault/set", "/vm/vault/del", "/update/apply", "/vm/file/upload",
-    "/rules", "/notify", "/notify/config", "/connectors/save", "/connectors/test", "/connectors/action",
+    "/rules", "/notify", "/notify/config", "/connectors/save", "/connectors/test", "/connectors/action", "/connectors/microsoft/start", "/connectors/microsoft/poll",
     "/memory/hindsight/start", "/memory/hindsight/stop", "/memory/hindsight/config",
     "/memory/hindsight/retain", "/memory/hindsight/forget", "/memory/hindsight/reset",
   ]);
@@ -2415,6 +2417,17 @@ const server = http.createServer(async function (req, res) {
         authorized: !!g.refreshToken,
         email: g.email || "",
       },
+      mail: {
+        configured: !!(((c.mail || {}).host) && c.mail.user && c.mail.pass),
+        user: (c.mail || {}).user || "",
+        host: (c.mail || {}).host || "",
+      },
+      microsoft: {
+        configured: !!(((c.microsoft || {}).clientId)),
+        authorized: !!(((c.microsoft || {}).refreshToken)),
+        email: (c.microsoft || {}).email || "",
+        devicePending: !!(((c.microsoft || {})._deviceCode)),
+      },
     };
   }
 
@@ -2587,6 +2600,185 @@ const server = http.createServer(async function (req, res) {
     return { htmlLink: d.htmlLink };
   }
 
+  // —— 邮件 SMTP（零依赖状态机：QQ/163/126/Gmail/Outlook 通用，授权码登录） ——
+  function smtpSend(cfg, args) {
+    return new Promise(function (resolve, reject) {
+      var to = String(args.to || "").trim();
+      if (!to || to.indexOf("@") < 1) return reject(new Error("缺收件人邮箱（to）"));
+      var subject = String(args.subject || "(Lumi 代发)").slice(0, 200);
+      var b64 = function (str) { return Buffer.from(str, "utf8").toString("base64"); };
+      var msg = [
+        "From: " + cfg.user,
+        "To: " + to,
+        "Subject: =?UTF-8?B?" + b64(subject) + "?=",
+        "MIME-Version: 1.0",
+        "Content-Type: text/plain; charset=UTF-8",
+        "Content-Transfer-Encoding: base64",
+        "Date: " + new Date().toUTCString(),
+        "Message-ID: <lumen-" + Date.now().toString(36) + "@lumen.local>",
+        "", b64(String(args.body || "")).replace(/(.{76})/g, "$1\r\n"),
+      ].join("\r\n");
+      var host = String(cfg.host || "");
+      var port = Number(cfg.port) || 465;
+      if (!host || !cfg.user || !cfg.pass) return reject(new Error("SMTP 配置不完整（服务器/账号/授权码）"));
+      var sock = null, pending = "", phase = "banner";
+      var implicitTls = cfg.sslMode === "ssl" || (!cfg.sslMode && port === 465); // 465=隐式TLS；587=STARTTLS
+      var timer = setTimeout(function () { blow(new Error("SMTP 超时（" + host + ":" + port + "）")); }, 20000);
+      function blow(e) { clearTimeout(timer); try { if (sock) sock.destroy(); } catch (e2) {} reject(e); }
+      function send(cmd) { try { sock.write(cmd + "\r\n"); } catch (e) { blow(e); } }
+      function attach(sk) {
+        sock = sk;
+        sk.setEncoding("utf8");
+        sk.on("data", function (d) {
+          pending += d;
+          var idx;
+          while ((idx = pending.indexOf("\n")) >= 0) {
+            var line = pending.slice(0, idx).replace(/\r$/, "");
+            pending = pending.slice(idx + 1);
+            if (/^\d{3} /.test(line)) handle(line);
+            else if (!/^\d{3}-/.test(line)) blow(new Error("SMTP 异常响应：" + line.slice(0, 80)));
+          }
+        });
+        sk.on("error", function (e) { blow(new Error("SMTP 连接错误：" + e.message)); });
+      }
+      function handle(ln) {
+        var code = Number(ln.slice(0, 3));
+        function need(c, what) {
+          if (code !== c) { blow(new Error("SMTP " + what + " 失败：" + ln.slice(0, 120))); return false; }
+          return true;
+        }
+        if (phase === "banner") { if (!need(220, "握手")) return; phase = "ehlo"; send("EHLO lumen.local"); return; }
+        if (phase === "ehlo" || phase === "ehlo2") {
+          if (!need(250, "EHLO")) return;
+          if (!cfg._plain && phase === "ehlo" && !implicitTls) { phase = "starttls"; send("STARTTLS"); return; }
+          phase = "auth"; send("AUTH LOGIN"); return;
+        }
+        if (phase === "starttls") {
+          if (!need(220, "STARTTLS")) return;
+          var raw = sock;
+          raw.removeAllListeners("data"); raw.removeAllListeners("error");
+          var tsock = tls.connect({ socket: raw, servername: host, rejectUnauthorized: !cfg._insecure }, function () {
+            if (!tsock.authorized && !cfg._insecure) return blow(new Error("SMTP 证书校验失败"));
+            attach(tsock);
+            phase = "ehlo2"; send("EHLO lumen.local");
+          });
+          tsock.on("error", function (e) { blow(new Error("SMTP 升级 TLS 失败：" + e.message)); });
+          return;
+        }
+        if (phase === "auth") { if (!need(334, "AUTH LOGIN")) return; phase = "user"; send(b64(cfg.user)); return; }
+        if (phase === "user") { if (!need(334, "用户名")) return; phase = "pass"; send(b64(cfg.pass)); return; }
+        if (phase === "pass") { if (!need(235, "授权码校验")) return; phase = "mail"; send("MAIL FROM:<" + cfg.user + ">"); return; }
+        if (phase === "mail") { if (!need(250, "MAIL FROM")) return; phase = "rcpt"; send("RCPT TO:<" + to + ">"); return; }
+        if (phase === "rcpt") { if (code !== 250 && code !== 251) return blow(new Error("收件人被拒：" + ln.slice(0, 120))); phase = "data"; send("DATA"); return; }
+        if (phase === "data") { if (!need(354, "DATA")) return; phase = "sent"; sock.write(msg + "\r\n.\r\n"); return; }
+        if (phase === "sent") { if (!need(250, "投递")) return; phase = "quit"; send("QUIT"); try { sock.end(); } catch (e) {} clearTimeout(timer); resolve({ to: to, via: "smtp:" + host }); return; }
+      }
+      if (implicitTls) {
+        attach(tls.connect({ host: host, port: port, servername: host, rejectUnauthorized: !cfg._insecure }));
+      } else {
+        attach(net.connect({ host: host, port: port }));
+      }
+    });
+  }
+
+  // —— 微软（个人账户 · 设备码授权 · Graph：Outlook 邮件 + 日历） ——
+  const MS_TENANT = "consumers";
+  const MS_SCOPES = "offline_access User.Read Mail.Send Calendars.ReadWrite";
+  async function msToken(params) {
+    const cfg = connectors.microsoft || {};
+    const r = await fetch("https://login.microsoftonline.com/" + MS_TENANT + "/oauth2/v2.0/token", {
+      method: "POST", headers: { "Content-Type": "application/x-www-form-urlencoded" },
+      body: new URLSearchParams(Object.assign({ client_id: cfg.clientId }, params)),
+    }).then(function (x) { return x.json(); });
+    if (r.error) {
+      const pending = r.error === "authorization_pending" || r.error === "slow_down";
+      const e = new Error(r.error_description || r.error);
+      if (pending) e.pending = true;
+      throw e;
+    }
+    return r;
+  }
+  async function msDeviceStart() {
+    const cfg = connectors.microsoft || {};
+    if (!cfg.clientId) throw new Error("先填 Azure 应用 client_id 并保存");
+    const r = await fetch("https://login.microsoftonline.com/" + MS_TENANT + "/oauth2/v2.0/devicecode", {
+      method: "POST", headers: { "Content-Type": "application/x-www-form-urlencoded" },
+      body: new URLSearchParams({ client_id: cfg.clientId, scope: MS_SCOPES }),
+    }).then(function (x) { return x.json(); });
+    if (r.error) throw new Error("设备码申请失败：" + (r.error_description || r.error) + "（检查 client_id 与重定向 URI 配置：设备码无需重定向）");
+    connectors.microsoft._deviceCode = r.device_code;
+    connectors.microsoft._deviceExp = Date.now() + (r.expires_in || 900) * 1000;
+    connectorsSave();
+    return { userCode: r.user_code, url: r.verification_uri, interval: r.interval || 5 };
+  }
+  async function msPoll() {
+    const ms = connectors.microsoft || {};
+    if (!ms._deviceCode) throw new Error("先点「发起设备码授权」");
+    if (!ms.refreshToken) {
+      let tk;
+      try { tk = await msToken({ grant_type: "urn:ietf:params:oauth:grants:device_code", device_code: ms._deviceCode }); }
+      catch (e) { if (e.pending) return { pending: true }; throw e; }
+      ms.refreshToken = tk.refresh_token;
+      ms._accessToken = tk.access_token;
+      ms._tokenExp = Date.now() + (tk.expires_in || 3600) * 1000;
+      delete ms._deviceCode;
+      const me = await fetch("https://graph.microsoft.com/v1.0/me", {
+        headers: { Authorization: "Bearer " + tk.access_token },
+      }).then(function (x) { return x.json(); }).catch(function () { return {}; });
+      ms.email = (me && (me.userPrincipalName || me.mail)) || "";
+      connectorsSave();
+      console.log("🔗 微软应用连接已授权：" + (ms.email || "(邮箱未读到)"));
+    }
+    return { ok: true, email: ms.email || "" };
+  }
+  async function msAccess() {
+    const ms = connectors.microsoft;
+    if (ms._accessToken && Date.now() < (ms._tokenExp || 0) - 60000) return ms._accessToken;
+    if (!ms.refreshToken) throw new Error("微软未授权：设置 → 应用连接");
+    const tk = await msToken({ grant_type: "refresh_token", refresh_token: ms.refreshToken });
+    ms._accessToken = tk.access_token;
+    ms._tokenExp = Date.now() + (tk.expires_in || 3600) * 1000;
+    connectorsSave();
+    return tk.access_token;
+  }
+  async function graphSend(args) {
+    const to = String(args.to || "").trim();
+    if (!to || to.indexOf("@") < 1) throw new Error("缺收件人邮箱（to）");
+    const r = await fetch("https://graph.microsoft.com/v1.0/me/sendMail", {
+      method: "POST",
+      headers: { Authorization: "Bearer " + (await msAccess()), "Content-Type": "application/json" },
+      body: JSON.stringify({
+        message: {
+          subject: String(args.subject || "(Lumi 代发)").slice(0, 200),
+          body: { contentType: "Text", content: String(args.body || "") },
+          toRecipients: [{ emailAddress: { address: to } }],
+        },
+        saveToSentItems: true,
+      }),
+    });
+    if (r.status !== 202) {
+      const d = await r.json().catch(function () { return {}; });
+      throw new Error("Outlook 发送失败：" + ((d.error && d.error.message) || r.status));
+    }
+    return { to: to, via: "graph" };
+  }
+  async function graphEvent(args) {
+    if (!args.startISO || !args.endISO) throw new Error("缺时间：需要 startISO / endISO（如 2026-10-02T09:00:00+08:00）");
+    const dt = function (iso) { return { dateTime: new Date(iso).toISOString().slice(0, 19), timeZone: "UTC" }; };
+    const r = await fetch("https://graph.microsoft.com/v1.0/me/events", {
+      method: "POST",
+      headers: { Authorization: "Bearer " + (await msAccess()), "Content-Type": "application/json" },
+      body: JSON.stringify({
+        subject: String(args.summary || "日程").slice(0, 200),
+        body: { contentType: "Text", content: String(args.description || "").slice(0, 1000) },
+        start: dt(args.startISO), end: dt(args.endISO),
+      }),
+    });
+    const d = await r.json().catch(function () { return {}; });
+    if (r.status !== 201) throw new Error("Outlook 日历创建失败：" + ((d.error && d.error.message) || r.status));
+    return { htmlLink: d.webLink || "" };
+  }
+
   // —— 应用连接路由 ——
   if (p === "/connectors" || p.indexOf("/connectors/") === 0) {
     if (req.method === "GET" && p === "/connectors") {
@@ -2626,8 +2818,21 @@ const server = http.createServer(async function (req, res) {
       } catch (e) { return page("❌", "授权失败：" + (e.message || e)); }
     }
     let cbody = null;
-    try { cbody = JSON.parse((await readBody(req, 256 * 1024)).toString("utf8")); }
+    try {
+      const rawC = (await readBody(req, 256 * 1024)).toString("utf8");
+      cbody = rawC ? JSON.parse(rawC) : {}; // 设备码 start/poll 无请求体
+    }
     catch (e) { return json(res, 400, { ok: false, error: "请求体非法" }); }
+    if (req.method === "POST" && p === "/connectors/microsoft/start") {
+      try { return json(res, 200, Object.assign({ ok: true }, await msDeviceStart())); }
+      catch (e) { return json(res, 200, { ok: false, error: String(e.message || e) }); }
+    }
+    if (req.method === "POST" && p === "/connectors/microsoft/poll") {
+      try {
+        const r = await msPoll();
+        return json(res, 200, Object.assign({ ok: true }, r));
+      } catch (e) { return json(res, 200, { ok: false, error: String(e.message || e) }); }
+    }
     if (req.method === "POST" && p === "/connectors/save") {
       const id = String(cbody.id || "");
       const patch = cbody.patch || {};
@@ -2645,6 +2850,18 @@ const server = http.createServer(async function (req, res) {
         if (typeof patch.clientSecret === "string") cur.clientSecret = patch.clientSecret.trim();
         if (patch.clearAuth) {
           delete cur.refreshToken; delete cur._accessToken; delete cur.email; cur._tokenExp = 0;
+        }
+      } else if (id === "mail") {
+        const cur = connectors.mail = connectors.mail || {};
+        ["host", "port", "user", "pass", "sslMode"].forEach(function (k) {
+          if (typeof patch[k] === "string") cur[k] = patch[k].trim();
+        });
+        cur.port = String(Number(cur.port) || 0);
+      } else if (id === "microsoft") {
+        const cur = connectors.microsoft = connectors.microsoft || {};
+        if (typeof patch.clientId === "string") cur.clientId = patch.clientId.trim();
+        if (patch.clearAuth) {
+          delete cur.refreshToken; delete cur._accessToken; delete cur.email; delete cur._deviceCode; cur._tokenExp = 0;
         }
       } else return json(res, 400, { ok: false, error: "未知连接 " + id });
       connectorsSave();
@@ -2672,6 +2889,19 @@ const server = http.createServer(async function (req, res) {
           await googleAccess(cfg);
           return json(res, 200, { ok: true, msg: "✅ 已授权" + (cfg.email ? " · " + cfg.email : "") });
         }
+        if (id === "mail") {
+          const cfg = connectors.mail || {};
+          if (!(cfg.host && cfg.user && cfg.pass)) throw new Error("先保存 SMTP 服务器 / 账号 / 授权码");
+          await smtpSend(cfg, { to: cfg.user, subject: "Lumen 连接测试", body: "这是一封由 Lumen 发出的 SMTP 连接测试邮件（" + new Date().toLocaleString("zh-CN") + "）。收到它说明邮件通道已打通。" });
+          return json(res, 200, { ok: true, msg: "✅ 测试邮件已发往 " + cfg.user + "（查收（含垃圾箱））" });
+        }
+        if (id === "microsoft") {
+          const cfg = connectors.microsoft || {};
+          if (!cfg.clientId) throw new Error("先填 Azure 应用的 client_id（应用注册免费）");
+          if (!cfg.refreshToken) throw new Error("已保存但未授权：点「发起设备码授权」，到 microsoft.com/link 输入代码完成登录");
+          await msAccess();
+          return json(res, 200, { ok: true, msg: "✅ 已授权" + (cfg.email ? " · " + cfg.email : "") });
+        }
         throw new Error("未知连接 " + id);
       } catch (e) { return json(res, 200, { ok: false, error: String(e.message || e) }); }
     }
@@ -2693,6 +2923,25 @@ const server = http.createServer(async function (req, res) {
           else if (action === "event") out = await googleEvent(args);
           else throw new Error("未知动作 " + action);
           console.log("📤 应用连接 · Google " + action);
+        } else if (id === "mail") {
+          // 邮件统一入口：谁配了用谁（SMTP 授权码 > 微软 Graph > Google OAuth）
+          const m = connectors.mail || {};
+          const ms = connectors.microsoft || {};
+          const g = connectors.google || {};
+          const via = (m.host && m.user && m.pass) ? "smtp" : (ms.refreshToken ? "microsoft" : (g.refreshToken ? "google" : ""));
+          if (!via) throw new Error("NOT_CONFIGURED");
+          if (action === "send") out = (via === "smtp") ? await smtpSend(m, args) : (via === "microsoft") ? await graphSend(args) : await googleSend(args);
+          else if (action === "event") {
+            if (via === "smtp") throw new Error("SMTP 只能发邮件；建日程请连接微软（设备码）或 Google（OAuth）");
+            out = (via === "microsoft") ? await graphEvent(args) : await googleEvent(args);
+          } else throw new Error("未知动作 " + action);
+          console.log("📤 应用连接 · 邮件(" + via + ") " + action);
+        } else if (id === "microsoft") {
+          if (!connectors.microsoft || !connectors.microsoft.refreshToken) throw new Error("微软未授权：设置 → 应用连接");
+          if (action === "send") out = await graphSend(args);
+          else if (action === "event") out = await graphEvent(args);
+          else throw new Error("未知动作 " + action);
+          console.log("📤 应用连接 · 微软 " + action);
         } else throw new Error("未知连接 " + id);
         return json(res, 200, { ok: true, result: out });
       } catch (e) {

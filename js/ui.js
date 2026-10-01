@@ -2501,7 +2501,7 @@
     larkBody.appendChild(connField("App ID", "text", "lark-appid", "cli_xxxxxxxx（应用模式）"));
     larkBody.appendChild(connField("App Secret", "password", "lark-appsecret", "应用模式密钥（不回显）"));
     larkBody.appendChild(connField("群 Webhook", "password", "lark-webhook", "https://open.feishu.cn/open-apis/bot/v2/hook/…（webhook 模式）"));
-    larkBody.appendChild(connField("默认群 chat_id", "text", "lark-chatid", "oc_xxxxxxxx（应用模式发消息的默认群）"));
+    larkBody.appendChild(connField("默认接收者", "text", "lark-chatid", "群 chat_id（oc_…）或对方邮箱（应用模式发消息/私信）"));
     var larkBtnRow = el("div", "set-row");
     var larkOut = el("div", "pc-test");
     larkBtnRow.appendChild(connBtn("保存", function () {
@@ -2590,19 +2590,147 @@
     gBody.appendChild(gBtnRow);
     gBody.insertAdjacentHTML("beforeend",
       '<div style="font-size:12.5px;color:var(--ink-faint);margin-top:6px;line-height:1.9">' +
-      '步骤：<a href="https://console.cloud.google.com/apis/credentials" target="_blank" style="color:var(--accent)">Google Cloud Console</a> → 凭据 → 创建 OAuth 客户端 ID（应用类型选「<b>桌面应用</b>」）→ 填 Client ID/Secret → 点「去授权」在弹出的 Google 页面登录并允许。回调走本机 localhost，凭证只存本机文件。<br>' +
+      '步骤：① <a href="https://console.cloud.google.com" target="_blank" style="color:var(--accent)">Google Cloud Console</a> 建项目（免费）；② OAuth 同意屏幕：External + 测试模式，把自己邮箱加为测试用户；③ 凭据 → 创建 OAuth 客户端 ID（应用类型选「<b>桌面应用</b>」）；④ 填 Client ID/Secret 点「去授权」。<b>首次授权 Google 会弹「未验证应用」警告——个人自用应用属正常现象</b>，点「高级 → 仍要继续」即可。回调走本机 localhost，凭证只存本机文件。<br>' +
       "连好后说「<b>发邮件给 xx@xx.com 主题：… 内容：…</b>」「<b>谷歌日历加个日程 周五下午 3 点 牙医</b>」就是真实发送/创建。</div>");
     gCard.appendChild(gBody);
     secConn.appendChild(gCard);
 
-    // —— Amazon（无消费者下单 API → 桌面虚拟机真实操作） ——
+    // —— 邮件（SMTP 授权码：QQ/163/126/Gmail/Outlook 通用） ——
+    var smtpCard = el("div", "provider-card");
+    var smtpHead = el("div", "pc-head");
+    smtpHead.innerHTML = '<span class="pc-name">邮件 · SMTP 授权码（QQ / 163 / Gmail / Outlook 通用）</span><span id="conn-mail-chip">' + connChip(false, "未配置") + "</span>";
+    smtpCard.appendChild(smtpHead);
+    var smtpBody = el("div", "pc-body");
+    var smtpPresetRow = el("div", "set-row");
+    smtpPresetRow.appendChild(el("label", "", "一键填服务商"));
+    var SMTP_PRESETS = [
+      ["QQ 邮箱", "smtp.qq.com", "465", "ssl"],
+      ["163 邮箱", "smtp.163.com", "465", "ssl"],
+      ["126 邮箱", "smtp.126.com", "465", "ssl"],
+      ["Gmail", "smtp.gmail.com", "465", "ssl"],
+      ["Outlook", "smtp.office365.com", "587", "starttls"],
+    ];
+    SMTP_PRESETS.forEach(function (p) {
+      smtpPresetRow.appendChild(connBtn(p[0], function () {
+        document.getElementById("mail-host").value = p[1];
+        document.getElementById("mail-port").value = p[2];
+        document.getElementById("mail-ssl").value = p[3];
+      }));
+    });
+    smtpBody.appendChild(smtpPresetRow);
+    smtpBody.appendChild(connField("邮箱账号", "text", "mail-user", "you@qq.com（同时是 SMTP 用户名和发件人）"));
+    smtpBody.appendChild(connField("授权码", "password", "mail-pass", "在邮箱设置里开启 SMTP 服务后生成的授权码（非登录密码）"));
+    smtpBody.appendChild(connField("SMTP 服务器", "text", "mail-host", "smtp.qq.com"));
+    smtpBody.appendChild(connField("端口", "text", "mail-port", "465（SSL）或 587（STARTTLS）"));
+    smtpBody.appendChild(connField("加密方式", "text", "mail-ssl", "ssl 或 starttls（留空按端口推断）"));
+    var smtpBtnRow = el("div", "set-row");
+    var smtpOut = el("div", "pc-test");
+    smtpBtnRow.appendChild(connBtn("保存", function () {
+      desktopApi("/connectors/save", "POST", {
+        id: "mail",
+        patch: {
+          host: document.getElementById("mail-host").value.trim(),
+          port: document.getElementById("mail-port").value.trim(),
+          user: document.getElementById("mail-user").value.trim(),
+          pass: document.getElementById("mail-pass").value.trim(),
+          sslMode: document.getElementById("mail-ssl").value.trim(),
+        },
+      }).then(function (d) {
+        if (d && d.ok) {
+          toast("邮件配置已保存（授权码只存本机）");
+          document.getElementById("mail-pass").value = "";
+          refreshConnChips(d);
+        } else toast("保存失败：" + ((d && d.error) || "服务桥离线"));
+      });
+    }, true));
+    smtpBtnRow.appendChild(connBtn("发测试邮件给自己", function () {
+      smtpOut.textContent = "发送中…";
+      desktopApi("/connectors/test", "POST", { id: "mail" }).then(function (d) {
+        smtpOut.className = "pc-test " + (d && d.ok ? "ok" : "err");
+        smtpOut.textContent = (d && d.ok && d.msg) || (d && d.error) || "服务桥离线";
+      });
+    }));
+    smtpBtnRow.appendChild(smtpOut);
+    smtpBody.appendChild(smtpBtnRow);
+    smtpBody.insertAdjacentHTML("beforeend",
+      '<div style="font-size:12.5px;color:var(--ink-faint);margin-top:6px;line-height:1.9">' +
+      "授权码怎么拿：<b>QQ 邮箱</b> 网页版设置 → 账户 → 开启 SMTP 服务 → 生成授权码；<b>163/126</b> 设置 → POP3/SMTP → 开启；<b>Gmail</b> 需先开两步验证 → 应用密码；<b>Outlook</b> 账号安全 → 应用密码。<br>" +
+      "连好后说「<b>发邮件给 xx@xx.com 主题：… 内容：…</b>」就是真实发送。</div>");
+    smtpCard.appendChild(smtpBody);
+    secConn.appendChild(smtpCard);
+
+    // —— 微软（设备码授权：Outlook 邮件 + 日历） ——
+    var msCard = el("div", "provider-card");
+    var msHead = el("div", "pc-head");
+    msHead.innerHTML = '<span class="pc-name">微软 · Outlook 邮件 / 日历（设备码授权）</span><span id="conn-ms-chip">' + connChip(false, "未配置") + "</span>";
+    msCard.appendChild(msHead);
+    var msBody = el("div", "pc-body");
+    msBody.appendChild(connField("Azure 应用 client_id", "text", "ms-clientid", "00000000-…（应用注册免费，公共客户端无需密钥）"));
+    var msBtnRow = el("div", "set-row");
+    var msOut = el("div", "pc-test");
+    msBtnRow.appendChild(connBtn("保存", function () {
+      desktopApi("/connectors/save", "POST", { id: "microsoft", patch: { clientId: document.getElementById("ms-clientid").value.trim() } })
+        .then(function (d) {
+          if (d && d.ok) { toast("已保存 client_id"); refreshConnChips(d); }
+          else toast("保存失败：" + ((d && d.error) || "服务桥离线"));
+        });
+    }, true));
+    msBtnRow.appendChild(connBtn("发起设备码授权", function () {
+      msOut.textContent = "申请设备码中…";
+      desktopApi("/connectors/microsoft/start", "POST", {}).then(function (d) {
+        if (d && d.ok) {
+          msOut.className = "pc-test ok";
+          msOut.innerHTML = "在手机或电脑打开 <a href=\"" + (d.url || "https://microsoft.com/link") + "\" target=\"_blank\" style=\"color:var(--accent)\">" + (d.url || "microsoft.com/link") + "</a>，输入代码：<b style=\"font-size:16px\">" + (d.userCode || "") + "</b>（15 分钟内有效），输完回来点「检查授权状态」";
+        } else {
+          msOut.className = "pc-test err";
+          msOut.textContent = (d && d.error) || "服务桥离线";
+        }
+      });
+    }));
+    msBtnRow.appendChild(connBtn("检查授权状态", function () {
+      msOut.textContent = "查询中…";
+      desktopApi("/connectors/microsoft/poll", "POST", {}).then(function (d) {
+        if (d && d.ok && d.pending) { msOut.className = "pc-test"; msOut.textContent = "还在等你输入代码（完成浏览器登录后再点一次）"; return; }
+        if (d && d.ok) {
+          msOut.className = "pc-test ok";
+          msOut.textContent = "✅ 微软已连接" + (d.email ? "（" + d.email + "）" : "");
+          desktopApi("/connectors").then(refreshConnChips);
+        } else {
+          msOut.className = "pc-test err";
+          msOut.textContent = (d && d.error) || "失败";
+        }
+      });
+    }));
+    msBtnRow.appendChild(connBtn("解除授权", function () {
+      if (!window.confirm("解除微软授权？")) return;
+      desktopApi("/connectors/save", "POST", { id: "microsoft", patch: { clearAuth: true } })
+        .then(function (d) { if (d && d.ok) { toast("已解除"); refreshConnChips(d); } });
+    }));
+    msBtnRow.appendChild(msOut);
+    msBody.appendChild(msBtnRow);
+    msBody.insertAdjacentHTML("beforeend",
+      '<div style="font-size:12.5px;color:var(--ink-faint);margin-top:6px;line-height:1.9">' +
+      'client_id 怎么拿：<a href="https://portal.azure.com/#blade/Microsoft_AAD_RegisteredApps/ApplicationsListBlade" target="_blank" style="color:var(--accent)">Azure 门户 → 应用注册</a>（免费，个人微软账户即可）→ 新注册 → 受支持的账户类型选「个人 Microsoft 账户」→ 复制应用程序(客户端) ID。设备码流程<b>不需要客户端密钥、不需要重定向 URI</b>。<br>' +
+      "连好后说「<b>发邮件给 xx@xx.com 主题：…</b>」「<b>outlook 日历加个日程 周五 3 点</b>」就是真实发送/创建。</div>");
+    msCard.appendChild(msBody);
+    secConn.appendChild(msCard);
+
+    // —— 购物（淘宝 / Amazon：无消费者下单 API → 桌面虚拟机真实操作） ——
     var aCard = el("div", "provider-card");
     var aHead = el("div", "pc-head");
-    aHead.innerHTML = '<span class="pc-name">Amazon · 购物</span><span class="pc-status off">走虚拟机操作</span>';
+    aHead.innerHTML = '<span class="pc-name">淘宝 / Amazon · 购物</span><span class="pc-status off">走虚拟机操作</span>';
     aCard.appendChild(aHead);
     var aBody = el("div", "pc-body");
     var aRow = el("div", "set-row");
-    aRow.appendChild(connBtn("派 Lumi 去虚拟机逛 Amazon", function () {
+    aRow.appendChild(connBtn("派 Lumi 去逛淘宝", function () {
+      closeSettings();
+      var inp = document.getElementById("input");
+      if (inp) {
+        inp.value = "在虚拟机打开淘宝网，搜索并对比我要买的东西，把最值得的加进购物车，下单前先请示我（登录用凭证安全区，或我手机扫码）";
+        inp.focus();
+      }
+    }, true));
+    aRow.appendChild(connBtn("派 Lumi 去逛 Amazon", function () {
       closeSettings();
       var inp = document.getElementById("input");
       if (inp) {
@@ -2613,9 +2741,31 @@
     aBody.appendChild(aRow);
     aBody.insertAdjacentHTML("beforeend",
       '<div style="font-size:12.5px;color:var(--ink-faint);margin-top:6px;line-height:1.9">' +
-      "亚马逊不向个人开放下单 API，所以不装「假接口」：Lumi 在<b>桌面虚拟机</b>的真实浏览器里替你逛、比价、加购物车——登录凭证放「凭证安全区」，付款前每一步都经 Sentinel 请示。</div>");
+      "淘宝和亚马逊都不向个人开放下单 API，所以不装「假接口」：Lumi 在<b>桌面虚拟机</b>的真实浏览器里替你逛、比价、加购物车——登录凭证放「凭证安全区」，付款前每一步都经 Sentinel 请示。淘宝风控较严，建议先手动扫码登录一次（登录态留在虚拟机里）。</div>");
     aCard.appendChild(aBody);
     secConn.appendChild(aCard);
+
+    // —— Bilibili（无公开写入 API → 桌面虚拟机） ——
+    var bCard = el("div", "provider-card");
+    var bHead = el("div", "pc-head");
+    bHead.innerHTML = '<span class="pc-name">Bilibili · 视频</span><span class="pc-status off">走虚拟机操作</span>';
+    bCard.appendChild(bHead);
+    var bBody = el("div", "pc-body");
+    var bRow = el("div", "set-row");
+    bRow.appendChild(connBtn("派 Lumi 去虚拟机开 B 站", function () {
+      closeSettings();
+      var inp = document.getElementById("input");
+      if (inp) {
+        inp.value = "在虚拟机打开 bilibili.com，帮我查这个 UP 主最近的更新并总结要点（涉及登录的操作先请示我）";
+        inp.focus();
+      }
+    }, true));
+    bBody.appendChild(bRow);
+    bBody.insertAdjacentHTML("beforeend",
+      '<div style="font-size:12.5px;color:var(--ink-faint);margin-top:6px;line-height:1.9">' +
+      "B 站没有开放个人写入 API：看视频、查更新、整理清单这类事，Lumi 直接在<b>桌面虚拟机</b>的真实浏览器里做；投币/充电等账户动作会先请示。</div>");
+    bCard.appendChild(bBody);
+    secConn.appendChild(bCard);
 
     function refreshConnChips(d) {
       var c = d && d.connectors;
@@ -2624,6 +2774,10 @@
       var gc = document.getElementById("conn-google-chip");
       if (lc) lc.innerHTML = connChip(c.lark && c.lark.configured, (c.lark && c.lark.configured) ? ("已配置 · " + ((c.lark.mode === "webhook") ? "群机器人" : "应用")) : "未配置");
       if (gc) gc.innerHTML = connChip(c.google && c.google.authorized, (c.google && c.google.authorized) ? ("已授权" + (c.google.email ? " · " + c.google.email : "")) : (c.google && c.google.configured ? "待授权" : "未配置"));
+      var mc = document.getElementById("conn-mail-chip");
+      var sc = document.getElementById("conn-ms-chip");
+      if (mc) mc.innerHTML = connChip(c.mail && c.mail.configured, (c.mail && c.mail.configured) ? ("已配置 · " + (c.mail.user || c.mail.host)) : "未配置");
+      if (sc) sc.innerHTML = connChip(c.microsoft && c.microsoft.authorized, (c.microsoft && c.microsoft.authorized) ? ("已授权" + (c.microsoft.email ? " · " + c.microsoft.email : "")) : (c.microsoft && c.microsoft.configured ? "待授权" : "未配置"));
     }
     desktopApi("/connectors").then(function (d) { if (d && d.ok) refreshConnChips(d); });
     body.appendChild(secConn);

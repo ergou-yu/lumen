@@ -141,6 +141,7 @@
   // —— 应用连接（飞书/Lark · Google 邮件日历）：真实 API 动作，优先于演示流 ——
   var CONNECTOR_LABELS = {
     "lark.send": "发送飞书消息", "lark.doc": "创建飞书文档", "lark.event": "创建飞书日程",
+    "mail.send": "发送邮件", "mail.event": "创建日历日程",
     "google.send": "发送 Gmail 邮件", "google.event": "创建 Google 日历日程",
   };
   function connLabel(conn) { return CONNECTOR_LABELS[conn.id + "." + conn.action] || "应用连接动作"; }
@@ -153,8 +154,8 @@
       if (/日历|日程|会议|提醒/.test(t)) return { id: "lark", action: "event" };
       return { id: "lark", action: "send" };
     }
-    if (/发(送)?邮件|邮件发|gmail|代发邮件/.test(t)) return { id: "google", action: "send" };
-    if (/谷歌|google/.test(t) && /日历|日程/.test(t)) return { id: "google", action: "event" };
+    if (/发(送)?邮件|邮件发|gmail|outlook|代发邮件/.test(t)) return { id: "mail", action: "send" };
+    if (/日历|日程/.test(t) && (/谷歌|google/.test(t) || /微软|outlook|microsoft/.test(t))) return { id: "mail", action: "event" };
     return null;
   }
 
@@ -172,6 +173,9 @@
       m = text.match(/(?:说|内容|发|发送|通知)(?:给)?(?:飞书|群|lark)?(?:消息|通知)?\s*[：:]\s*([\s\S]+)/i)
         || text.match(/(?:发|发送|通知)(?:一下)?(?:给)?(?:飞书|群|lark)\s*(?:说)?\s*([\s\S]+)/i);
       if (m) return Promise.resolve({ text: m[1].trim() });
+    } else if (key === "mail.send") {
+      m = text.match(/发(?:送)?邮件给\s*([^\s，,]+)\s*主题[：:]\s*([^\n]+?)\s*内容[：:]\s*([\s\S]+)/i);
+      if (m) return Promise.resolve({ to: m[1].trim(), subject: m[2].trim(), body: m[3].trim() });
     } else if (key === "lark.doc") {
       m = text.match(/[：:]\s*([\s\S]+)/) || text.match(/(?:写|记|存)(?:一份|一个|篇)?(.+)/);
       if (m) {
@@ -207,6 +211,11 @@
       if (key === "lark.send") det = "消息已" + (((result && result.channel) === "webhook") ? "通过群机器人送达飞书群" : "送达飞书（应用身份）") + "。";
       if (key === "lark.doc") det = "文档已创建：" + ((result && result.url) || "") + ((result && result.note) || "");
       if (key === "lark.event") det = "飞书日程已创建（事件号 " + ((result && result.eventId) || "-") + "）。";
+      if (key === "mail.send") {
+        var via = (result && result.via) || "";
+        det = "邮件已发给 " + ((result && result.to) || "收件人") + "（" + (via.indexOf("smtp:") === 0 ? "SMTP 直发 · " + via.slice(5) : via === "graph" ? "微软 Graph" : "Gmail") + "）。";
+      }
+      if (key === "mail.event") det = "日历日程已创建：" + ((result && result.htmlLink) || "（可在日历应用查看）");
       if (key === "google.send") det = "邮件已通过你的 Gmail 发给 " + ((result && result.to) || "收件人") + "。";
       if (key === "google.event") det = "Google 日历日程已创建：" + ((result && result.htmlLink) || "");
       return label + "办好了 ✅\n\n" + det + "\n\n（发送前经过了你的批准，动作已写入审计日志）";
@@ -214,7 +223,7 @@
     if (failReason === "BRIDGE_OFF") return "这次没法" + label + "：本地服务桥不在线。请先启动服务桥（node server.js 或 sh run.sh）再说一次。";
     if (failReason && failReason.indexOf("NOT_CONFIGURED") === 0) {
       if (conn.id === "lark") return "飞书还没连接，这次我没有发送任何东西（不想假装发过）。\n\n两种连法（设置 → 应用连接 → 飞书）：\n1. **群机器人 Webhook**——在飞书群里加「自定义机器人」，把 Webhook 地址贴进来即可发群消息，最简单；\n2. **自建应用**——飞书开放平台建应用，填 App ID/Secret，还能建文档、建日程。\n\n连好后再说一次「飞书发：…」，我就真发了。";
-      return "Google 还没授权，这次我没有发送任何东西。\n\n连接方法（设置 → 应用连接 → Google）：在 Google Cloud Console 建一个 OAuth 客户端（应用类型选「桌面应用」），把 Client ID / Secret 填进来点「去授权」一次即可。连好后邮件与日历就是真发真建。\n\n（过渡方案：说「生成邮件草稿」，我给你 .eml 文件，导入邮箱客户端发送）";
+      return "邮件通道还没连接，这次我没有发送任何东西。\n\n三种连法按省事程度排（设置 → 应用连接）：\n1. **SMTP 授权码（最快，QQ/163/126/Gmail/Outlook 通用）**——在邮箱设置里开启 SMTP 服务拿「授权码」，填进来就能用；\n2. **微软设备码**——Azure 注册个免费应用拿 client_id，点「发起设备码授权」后到 microsoft.com/link 输个代码，Outlook 邮件+日历都通；\n3. **Google OAuth**——Cloud Console 建桌面应用客户端，授权一次。\n\n（过渡方案：说「生成邮件草稿」，我先给你 .eml 文件）";
     }
     if (failReason === "NEED_ARGS") {
       var fmt = (conn.id === "google" && conn.action === "send")

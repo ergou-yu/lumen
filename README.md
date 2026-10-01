@@ -23,6 +23,7 @@ node server.js        # 一条命令：启动本地网址 + 技能库 + 虚拟�
 | 任意模型 API Key | 基础模型（六家厂商或自定义端点，自带 Key） | 设置 → 模型接入，填入你自己的 Key |
 | 任意 OpenAI 兼容 Key | 换用其他模型 | 设置 → 模型接入 |
 | qcu CLI | 「用我的电脑」真机操作流 | `pip install -e quick-computer-use` |
+| [Hindsight](https://github.com/vectorize-io/hindsight) 记忆服务 | 深度长期记忆（对话沉淀 → 四路检索召回 → 反思） | 设置 → 长期记忆引擎，一键启动本地容器（需 Docker） |
 
 > 克隆后无任何个人数据：工作区、凭证安全区、任务状态都是首次运行时自动生成的空文件。
 
@@ -117,6 +118,22 @@ Lumen 桌面虚拟机的完整形态——**Lumi 拥有一台真正的「电脑�
 ## ⏸ 暂停与继续
 
 「计算机」页的运行中桌面任务可**暂停**（已完成的动作保留，状态冻结）与**继续**，也可随时停止。
+
+## 🧠 深度长期记忆（Hindsight，可选）
+
+Lumen 自带轻量记忆（对话沉淀为短条目，存浏览器 localStorage，注入系统提示词）。想要「会学习」的深度记忆，可接入开源记忆系统 [Hindsight](https://github.com/vectorize-io/hindsight)（vectorize.io，MIT，LongMemEval SOTA）——它用**自己的 LLM** 把对话抽取成事实 / 经历 / 观察，检索时四路并发（语义 + 关键词 + 实体图谱 + 时序）融合排序：
+
+```
+你说一句话 → recall 四路检索召回相关记忆 → 注入 Lumi 的上下文一起作答
+            → 对话结束自动 retain：事实/偏好/关系由 Hindsight 的 LLM 抽取入库
+```
+
+- **一键开启**：设置 → 长期记忆引擎 → 「启用并启动」。服务桥用 Docker 拉起本地容器 `lumen-hindsight`（镜像 `ghcr.io/vectorize-io/hindsight:latest`），记忆数据落私有卷 `lumen-hindsight-data`（重启不丢），端口只绑 127.0.0.1；开关持久化，服务桥重启自动拉起。
+- **模型**：Hindsight 抽取事实需要 LLM——缺省**复用服务端模型**（`LUMEN_MODEL_*`，任意 Anthropic 兼容端点），也可用 `LUMEN_HINDSIGHT_LLM_PROVIDER / _API_KEY / _MODEL / _BASE_URL` 单独指定（openai / anthropic / zai / deepseek / ollama 等 25+ 供应商）。
+- **自建服务直连**：已在别处跑着 Hindsight？`LUMEN_HINDSIGHT_URL=http://127.0.0.1:8888 LUMEN_HINDSIGHT_BANK=lumi node server.js` 即直连（不再代管容器）。
+- **拉取慢 / 超时**：镜像在 ghcr.io，个别网络直连不稳。可设 `LUMEN_HINDSIGHT_IMAGE` 换源，例如 `LUMEN_HINDSIGHT_IMAGE=ghcr.nju.edu.cn/vectorize-io/hindsight:latest node server.js`（或手动 `docker pull` 镜像源后 `docker tag` 成官方名，效果相同）。
+- **管理**：「记忆」页多出深度记忆区——**语义检索**（输入问题即召回）、**深度反思**（reflect：多步检索后基于记忆作答）、逐条**遗忘**、一键清空记忆库；设置页可打开 Hindsight 自带控制台。
+- **不启用也照常**：零依赖承诺不变，轻量记忆与其余功能完全不受影响。接口同源守卫：`/memory/hindsight/*`（status / start / stop / config / retain / recall / reflect / memories / forget / reset）。
 
 ## 📱 手机访问（同一 WiFi 遥控）
 
@@ -239,7 +256,7 @@ Lumen/
 ├── index.html        # 应用骨架：七 Tab（聊天/动态/灵感/目标/文件/计算机/技能）+ 设置/查看器弹窗
 ├── vm-home/          # LumenBox 虚拟计算机工作区（Lumi 的文件囚于此目录）
 ├── vm-box/           # LumenBox Desktop 镜像（Dockerfile + 容器内控制服务：桌面/Chromium/VNC/输入注入）
-├── server.js         # 本地服务桥：网站伺服 + 服务端模型网关（环境变量自带 Key）+ 技能服务 + QCU 桥 + LumenBox 虚拟计算机（零依赖 Node）
+├── server.js         # 本地服务桥：网站伺服 + 服务端模型网关（环境变量自带 Key）+ 技能服务 + QCU 桥 + LumenBox 虚拟计算机 + Hindsight 记忆桥（可选）（零依赖 Node）
 ├── assets/           # 莫奈真迹（头像/欢迎画，公有领域数字化图像）
 ├── skills/           # 内置技能库（10 个，每个含 SKILL.md）
 ├── css/
@@ -262,7 +279,7 @@ Lumen/
 |---|---|
 | 联网研究 | 模型生成搜索词 → DuckDuckGo/Bing/百度多引擎检索（广告过滤+相关度打分+30min缓存）→ 抓取正文 → 模型基于真实证据作答（标注来源、检索不到就明说、不编造） |
 | **7×24 后台监控** | 说「帮我盯着……」注册服务桥常驻任务：**关掉浏览器也继续跑**，定时真实检索+模型判断命中，结果见目标页监控区与动态页命中卡 |
-| **长期记忆** | 对话后自动沉淀偏好/事实/关系/习惯（去重），「记忆」页可查看/编辑/**遗忘**/手动添加，注入每次对话的系统提示词 |
+| **长期记忆** | 轻量：对话后自动沉淀偏好/事实/关系/习惯（去重），「记忆」页可查看/编辑/**遗忘**/手动添加，注入每次对话的系统提示词；深度（可选）：接入 Hindsight——对话自动 retain 抽取事实/经历/观察，回答前四路检索召回注入，「记忆」页可语义检索/深度反思/逐条遗忘 |
 | 个性化（形象/名字/说话方式） | 三个莫奈真迹头像 + 三种语气（温柔印象派/简洁高效/热心絮叨），全部注入人格提示词 |
 | 语音模式 | 输入：麦克风语音转文字；输出：可选朗读回复（语速随语气） |
 | 文档 | 文件页保存模型真实回答全文（含来源链接） |

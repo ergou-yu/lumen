@@ -14,6 +14,9 @@
   4) 虚拟计算机 LumenBox：Lumi「自己的电脑」（本地常驻执行环境）
      ——虚拟浏览器（真实检索/打开/点链接/阅读）+ 囚笼工作区 vm-home/ +
      软沙箱终端（默认关）。浏览类任务优先在这里完成，不操控用户本机。
+  5) Hindsight 深度记忆桥（可选 · vectorize-io/hindsight）：retain/recall/
+     reflect——对话沉淀为事实与观察、四路检索注入上下文、基于记忆回顾。
+     用户自建（LUMEN_HINDSIGHT_URL）或由本桥托管 Docker 容器，数据全本地。
 
    启动：node server.js   （PORT=8787 可改；LUMEN_NO_OPEN=1 禁止自动开浏览器）
    ============================================================ */
@@ -1839,6 +1842,242 @@ setTimeout(function () {
   }
 }, 1000);
 
+/* ============ Hindsight 长期记忆桥（可选 · vectorize-io/hindsight） ============
+ * Lumi 的深度记忆引擎（github.com/vectorize-io/hindsight，MIT）：
+ *   retain  —— 对话/任务沉淀为事实、经历与观察（由 Hindsight 的 LLM 抽取）
+ *   recall  —— 四路检索（语义/关键词/图谱/时序）召回相关记忆，注入对话上下文
+ *   reflect —— 基于记忆库的深度回顾问答
+ * 服务形态（二选一，均为可选，不启用不影响任何现有功能）：
+ *   · 用户自建的 Hindsight：环境变量 LUMEN_HINDSIGHT_URL 指过去（默认不设）
+ *   · 服务桥托管 Docker 容器 lumen-hindsight（设置页一键启动）：
+ *     镜像 ghcr.io/vectorize-io/hindsight:latest，记忆数据落私有卷
+ *     lumen-hindsight-data（重启不丢）；端口只绑本机回环。
+ * LLM 配置：Hindsight 抽取事实需要模型——优先 LUMEN_HINDSIGHT_LLM_PROVIDER/
+ * _API_KEY/_MODEL/_BASE_URL，缺省复用服务端模型（Anthropic 兼容端点）。
+ * ============ */
+
+const HS_NAME = "lumen-hindsight";
+// 镜像源可覆盖（例：国内网络直连 ghcr 超时时，设 LUMEN_HINDSIGHT_IMAGE 为镜像加速地址）
+const HS_IMAGE = process.env.LUMEN_HINDSIGHT_IMAGE || "ghcr.io/vectorize-io/hindsight:latest";
+const HS_CFG_FILE = path.join(LUMEN_DIR, "lumen-hindsight.json");
+let hsCfg = {
+  enabled: false,     // 开关（决定启动时自动拉起 + 聊天接入）
+  url: "",            // 用户自建 Hindsight 的地址（空 = 用托管容器/默认 8888）
+  bank: process.env.LUMEN_HINDSIGHT_BANK || "lumi",
+  apiPort: 0, uiPort: 0, // 托管容器发现的宿主端口（随机映射）
+};
+try { hsCfg = Object.assign(hsCfg, JSON.parse(fs.readFileSync(HS_CFG_FILE, "utf8")) || {}); } catch (e) {}
+function hsCfgSave() {
+  try { fs.writeFileSync(HS_CFG_FILE, JSON.stringify(hsCfg, null, 2)); } catch (e) {}
+}
+
+function hsBaseUrl() {
+  if (process.env.LUMEN_HINDSIGHT_URL) return process.env.LUMEN_HINDSIGHT_URL.replace(/\/+$/, "");
+  if (hsCfg.url) return hsCfg.url.replace(/\/+$/, "");
+  if (hsCfg.apiPort) return "http://127.0.0.1:" + hsCfg.apiPort;
+  return "http://127.0.0.1:8888";
+}
+function hsManagedHere() { return !process.env.LUMEN_HINDSIGHT_URL && !hsCfg.url; } // 容器是否归本桥代管
+
+async function hsFetch(pathname, init, timeoutMs) {
+  const ctrl = new AbortController();
+  const timer = setTimeout(function () { ctrl.abort(); }, timeoutMs || 8000);
+  try {
+    const r = await fetch(hsBaseUrl() + pathname, Object.assign({ signal: ctrl.signal }, init || {}));
+    const text = await r.text();
+    let data = null;
+    try { data = JSON.parse(text); } catch (e) { data = null; }
+    return { status: r.status, ok: r.ok, data: data, text: String(text).slice(0, 400) };
+  } finally { clearTimeout(timer); }
+}
+
+async function hsApiReachable() {
+  try {
+    const r = await hsFetch("/health", {}, 2500);
+    return { reachable: !!r.ok };
+  } catch (e) { return { reachable: false, error: e.message }; }
+}
+
+// 记忆库幂等 upsert（POST /v1/default/banks/{bank}，带 Lumi 的记忆使命）
+let hsBankReady = false;
+async function hsEnsureBank() {
+  if (hsBankReady) return true;
+  const r = await hsFetch("/v1/default/banks/" + encodeURIComponent(hsCfg.bank), {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      reflect_mission: "你是 Lumi——用户的私人 AI 助理。基于记忆库回答关于用户偏好、事实、关系、习惯与历史任务的问题；不确定就明确说不确定。",
+      retain_mission: "重点记住用户的偏好、事实、关系、习惯，以及任务的目标与结论。",
+    }),
+  }, 15000);
+  hsBankReady = r.ok;
+  return r.ok;
+}
+
+// Hindsight 的 LLM 环境变量（密钥只进容器，不落任何日志）
+function hsLlmEnv() {
+  const provider = process.env.LUMEN_HINDSIGHT_LLM_PROVIDER || (serverModelReady() ? "anthropic" : "");
+  if (!provider) return null;
+  const env = { HINDSIGHT_API_LLM_PROVIDER: provider };
+  const key = process.env.LUMEN_HINDSIGHT_LLM_API_KEY || MODEL_KEY || "";
+  if (key) env.HINDSIGHT_API_LLM_API_KEY = key;
+  const model = process.env.LUMEN_HINDSIGHT_LLM_MODEL || MODEL_NAME || "";
+  if (model) env.HINDSIGHT_API_LLM_MODEL = model;
+  const base = process.env.LUMEN_HINDSIGHT_LLM_BASE_URL || (provider === "anthropic" ? MODEL_BASE : "");
+  if (base) env.HINDSIGHT_API_LLM_BASE_URL = base;
+  return env;
+}
+
+async function hsContainerStatus() {
+  const r = await sh("docker", ["ps", "-a", "--filter", "name=^" + HS_NAME + "$", "--format", "{{.Names}} {{.Status}}"], 15000);
+  if (!r.ok || !r.out.trim()) return null;
+  const m = r.out.trim().match(/^(\S+)\s+(.*)$/);
+  return m ? { name: m[1], status: m[2], running: /Up /i.test(m[2]) } : null;
+}
+
+async function hsDiscoverPorts() {
+  const pm = await sh("docker", ["port", HS_NAME], 15000);
+  const ports = { api: 0, ui: 0 };
+  for (const line of pm.out.split("\n")) {
+    const m = line.match(/^(8888|9999)\/tcp -> 127\.0\.0\.1:(\d+)/);
+    if (m) ports[m[1] === "8888" ? "api" : "ui"] = parseInt(m[2], 10);
+  }
+  return ports;
+}
+
+const hsState = { busy: false, lastError: "" };
+async function hsStart() {
+  if (hsState.busy) return { ok: false, error: "已在启动中，请稍候" };
+  hsState.busy = true;
+  hsState.lastError = "";
+  try {
+    const reach = await hsApiReachable();
+    if (reach.reachable) {
+      hsCfg.enabled = true; hsCfgSave();
+      return { ok: true, note: "Hindsight 已在运行（" + hsBaseUrl() + "），直接连接" };
+    }
+    if (!hsManagedHere()) {
+      const err = "连接不上自建 Hindsight（" + hsBaseUrl() + "）：请确认服务已启动";
+      hsState.lastError = err;
+      return { ok: false, error: err };
+    }
+    const daemon = await dockerAvailable();
+    if (!daemon) {
+      const err = "Hindsight 未运行，且 Docker 不可用（启动 Docker Desktop 后重试）";
+      hsState.lastError = err;
+      return { ok: false, error: err };
+    }
+    const llm = hsLlmEnv();
+    if (!llm) {
+      const err = "Hindsight 抽取记忆需要模型：请先配置 LUMEN_MODEL_API_KEY / LUMEN_MODEL_BASE（或 LUMEN_HINDSIGHT_LLM_* 专用变量）后重启服务桥";
+      hsState.lastError = err;
+      return { ok: false, error: err };
+    }
+    const st = await hsContainerStatus();
+    if (!(st && st.running)) {
+      if (st) await sh("docker", ["rm", "-f", HS_NAME], 30000);
+      const args = ["run", "-d", "--name", HS_NAME, "--restart", "unless-stopped",
+        "--memory", "2g", "--cpus", "1.5",
+        "-p", "127.0.0.1::8888", "-p", "127.0.0.1::9999",
+        "-v", "lumen-hindsight-data:/home/hindsight/.pg0",
+        "-e", "HINDSIGHT_API_ENABLE_BANK_LLM_HEALTH=true"]; // 设置页「LLM 探测」用（主动型检查，按需调用）
+      for (const k of Object.keys(llm)) args.push("-e", k + "=" + llm[k]);
+      args.push(HS_IMAGE);
+      // 首次会拉镜像（可能数分钟）：不设短超时，留 tail 日志排错
+      const r = await new Promise(function (resolve) {
+        const child = spawn("docker", args, { stdio: ["ignore", "pipe", "pipe"] });
+        let tail = "";
+        child.stdout.on("data", function (d) { tail = (tail + d.toString()).slice(-3000); });
+        child.stderr.on("data", function (d) { tail = (tail + d.toString()).slice(-3000); });
+        child.on("error", function (e) { resolve({ ok: false, err: e.message }); });
+        child.on("close", function (code) { resolve({ ok: code === 0, err: tail.slice(-1200) }); });
+      });
+      if (!r.ok) {
+        const err = "容器启动失败（首次拉取镜像较慢，可稍后重试）：\n" + r.err;
+        hsState.lastError = err;
+        return { ok: false, error: err };
+      }
+    }
+    const ports = await hsDiscoverPorts();
+    if (!ports.api) {
+      const err = "端口发现失败：docker port " + HS_NAME;
+      hsState.lastError = err;
+      return { ok: false, error: err };
+    }
+    hsCfg.apiPort = ports.api; hsCfg.uiPort = ports.ui; hsCfg.enabled = true;
+    hsCfgSave();
+    hsBankReady = false;
+    for (let i = 0; i < 40; i++) { // 等健康（冷启动 10s+）
+      const h = await hsApiReachable();
+      if (h.reachable) {
+        console.log("🧠 Hindsight 记忆服务已启动：" + hsBaseUrl() + "（bank " + hsCfg.bank + "）");
+        return { ok: true, url: hsBaseUrl(), ui: hsCfg.uiPort ? "http://127.0.0.1:" + hsCfg.uiPort : "" };
+      }
+      await new Promise(function (r2) { setTimeout(r2, 1500); });
+    }
+    const err = "容器已启动但健康检查超时（docker logs " + HS_NAME + " 排查；LLM 配置错误也会卡住）";
+    hsState.lastError = err;
+    return { ok: false, error: err };
+  } finally { hsState.busy = false; }
+}
+
+async function hsStop() {
+  if (hsManagedHere()) await sh("docker", ["stop", HS_NAME], 60000);
+  hsCfg.enabled = false;
+  hsBankReady = false;
+  hsCfgSave();
+  return { ok: true, note: hsManagedHere() ? "容器已停止（记忆数据保留在卷 lumen-hindsight-data）" : "已断开自建 Hindsight" };
+}
+
+async function hsStatus(deep) {
+  const reach = await hsApiReachable();
+  const out = {
+    ok: true,
+    enabled: hsCfg.enabled,
+    url: hsBaseUrl(),
+    bank: hsCfg.bank,
+    managed: hsManagedHere(),
+    api: { reachable: reach.reachable },
+    version: "",
+    docker: null,
+    container: null,
+    uiUrl: hsCfg.uiPort && hsManagedHere() ? "http://127.0.0.1:" + hsCfg.uiPort : "",
+    busy: hsState.busy,
+    lastError: hsState.lastError,
+    llm: null,
+    memories: null,
+  };
+  try { out.docker = await dockerAvailable(); } catch (e) { out.docker = null; }
+  const st = await hsContainerStatus();
+  out.container = st ? st.status : null;
+  if (reach.reachable) {
+    try {
+      const v = await hsFetch("/version", {}, 3000);
+      out.version = (v.data && (v.data.api_version || v.data.version)) || "";
+    } catch (e) {}
+    if (deep) {
+      try { // 会真实探测一次 LLM（Hindsight 侧约定，POST），仅在设置页打开时调用
+        const l = await hsFetch("/v1/default/banks/" + encodeURIComponent(hsCfg.bank) + "/health/llm", { method: "POST" }, 20000);
+        out.llm = l.ok ? { ok: true } : { ok: false, detail: l.text };
+      } catch (e) { out.llm = { ok: false, detail: e.message }; }
+      try {
+        const m = await hsFetch("/v1/default/banks/" + encodeURIComponent(hsCfg.bank) + "/memories/list?limit=1", {}, 6000);
+        out.memories = (m.data && typeof m.data.total === "number") ? m.data.total : (m.status === 404 ? 0 : null);
+      } catch (e) {}
+    }
+  }
+  return out;
+}
+
+// 启动 8 秒后：开关开着且服务不在 → 后台自动拉起（不阻塞启动）
+setTimeout(async function () {
+  if (!hsCfg.enabled) return;
+  const reach = await hsApiReachable();
+  if (reach.reachable) { console.log("🧠 深度记忆 Hindsight 已连接：" + hsBaseUrl() + "（bank " + hsCfg.bank + "）"); return; }
+  console.log("🧠 正在拉起 Hindsight 记忆服务（Docker）…");
+  hsStart().then(function (r) { if (!r.ok) console.warn("🧠 Hindsight 自动拉起失败：" + String(r.error || "").slice(0, 120)); });
+}, 8000);
+
 /* ============ HTTP 服务 ============ */
 
 const server = http.createServer(async function (req, res) {
@@ -1871,6 +2110,7 @@ const server = http.createServer(async function (req, res) {
       "<p>QCU 执行桥：POST /qcu/exec（qcu CLI 已在 PATH 中检测：" + (process.platform === "win32" ? "请自行确认" : "是") + "）</p>" +
       "<p>虚拟计算机 LumenBox：POST /vm/exec（browser/files/shell）· GET /vm/state · 工作区 <code>vm-home/</code>（终端" + (VM_SHELL_SERVER_ON ? "总闸开，仍需应用内开启" : "已被服务端禁用") + "）</p>" +
       "<p>本地网关接入（可选）：设置 → 模型接入 → 本地网关，接口地址 <code>http://127.0.0.1:" + PORT + "/v1</code>。</p>" +
+      "<p>深度记忆 Hindsight（可选）：" + (hsCfg.enabled ? "<b style='color:#2e7d4f'>已启用</b> · " + hsBaseUrl() + " · bank <code>" + hsCfg.bank + "</code>" : "未启用（设置 → 长期记忆引擎）") + "</p>" +
       "<hr><p style='color:#888;font-size:13px'>仅监听 127.0.0.1 · 密钥来自 LUMEN_MODEL_API_KEY 环境变量，Lumen 不读取任何第三方工具的本地配置</p></body>"
     );
   }
@@ -1984,8 +2224,10 @@ const server = http.createServer(async function (req, res) {
     "/vm/desktop/start", "/vm/desktop/stop", "/vm/desktop/build", "/vm/desktop/act",
     "/sentinel/decide", "/vm/vault/set", "/vm/vault/del", "/update/apply", "/vm/file/upload",
     "/rules", "/notify", "/notify/config", "/connectors/save", "/connectors/test", "/connectors/action",
+    "/memory/hindsight/start", "/memory/hindsight/stop", "/memory/hindsight/config",
+    "/memory/hindsight/retain", "/memory/hindsight/forget", "/memory/hindsight/reset",
   ]);
-  if (p.indexOf("/vm/desktop/") === 0 || p.indexOf("/vm/vault") === 0 || p.indexOf("/sentinel/") === 0 || p === "/vm/file/upload" || p.indexOf("/rules") === 0 || p.indexOf("/notify") === 0 || p.indexOf("/connectors") === 0) {
+  if (p.indexOf("/vm/desktop/") === 0 || p.indexOf("/vm/vault") === 0 || p.indexOf("/sentinel/") === 0 || p === "/vm/file/upload" || p.indexOf("/rules") === 0 || p.indexOf("/notify") === 0 || p.indexOf("/connectors") === 0 || p.indexOf("/memory/hindsight") === 0) {
     const origin = req.headers["origin"];
     let sameOrigin = !origin;
     if (origin) {
@@ -2522,6 +2764,130 @@ const server = http.createServer(async function (req, res) {
     return json(res, r.sent ? 200 : 202, r);
   }
 
+  // —— Hindsight 长期记忆（可选；读写均同源守卫，见上方） ——
+  if (p.indexOf("/memory/hindsight") === 0) {
+    if (req.method === "GET" && p === "/memory/hindsight/status") {
+      return json(res, 200, await hsStatus(u.searchParams.get("deep") === "1"));
+    }
+    if (req.method === "POST" && p === "/memory/hindsight/start") {
+      if (hsState.busy) return json(res, 202, { ok: true, starting: true });
+      hsStart().catch(function () {}); // 后台拉起（首次拉镜像可能数分钟），客户端轮询 /status
+      return json(res, 202, { ok: true, starting: true });
+    }
+    if (req.method === "POST" && p === "/memory/hindsight/stop") {
+      return json(res, 200, Object.assign({ ok: true }, await hsStop()));
+    }
+    if (req.method === "GET" && p === "/memory/hindsight/memories") {
+      if (!(await hsApiReachable())) {
+        return json(res, 200, { ok: false, offline: true, error: "Hindsight 未运行（设置 → 长期记忆引擎 · Hindsight）" });
+      }
+      const qs = new URLSearchParams();
+      ["type", "q"].forEach(function (k) { const v = u.searchParams.get(k); if (v) qs.set(k, v.slice(0, 200)); });
+      qs.set("limit", String(Math.min(parseInt(u.searchParams.get("limit"), 10) || 50, 200)));
+      qs.set("offset", String(Math.max(0, parseInt(u.searchParams.get("offset"), 10) || 0)));
+      const r = await hsFetch("/v1/default/banks/" + encodeURIComponent(hsCfg.bank) + "/memories/list?" + qs.toString(), {}, 15000);
+      if (r.status === 404) return json(res, 200, { ok: true, items: [], total: 0, empty: true }); // 库还没建（reset 后首条 retain 前）
+      if (!r.ok) return json(res, 200, { ok: false, error: "列表失败：" + r.text });
+      const items = ((r.data && r.data.items) || []).map(function (x) {
+        return { id: x.id, text: x.text || x.content || "", type: x.fact_type || x.type || "", mentionedAt: x.mentioned_at || x.date || "" };
+      });
+      return json(res, 200, { ok: true, items: items, total: (r.data && r.data.total) != null ? r.data.total : items.length });
+    }
+    let hbody = null;
+    try {
+      const raw = (await readBody(req, 256 * 1024)).toString("utf8");
+      hbody = raw.trim() ? JSON.parse(raw) : {}; // 无参动作（stop/reset 等）允许空 body
+    } catch (e) { return json(res, 400, { ok: false, error: "请求体非法" }); }
+    if (req.method === "POST" && p === "/memory/hindsight/config") {
+      // 目前只承载开关（地址/库由环境变量与 lumen-hindsight.json 管理，不开放远程改写）
+      if (typeof hbody.enabled === "boolean") { hsCfg.enabled = hbody.enabled; hsCfgSave(); }
+      return json(res, 200, { ok: true, enabled: hsCfg.enabled });
+    }
+    if (!(await hsApiReachable())) {
+      return json(res, 200, { ok: false, offline: true, error: "Hindsight 未运行（设置 → 长期记忆引擎 · Hindsight）" });
+    }
+    if (req.method === "POST" && p === "/memory/hindsight/retain") {
+      const content = String(hbody.content || "").slice(0, 20000);
+      if (!content.trim()) return json(res, 400, { ok: false, error: "content 必填" });
+      if (!(await hsEnsureBank())) return json(res, 200, { ok: false, error: "记忆库初始化失败（检查 Hindsight 的 LLM 配置）" });
+      const r = await hsFetch("/v1/default/banks/" + encodeURIComponent(hsCfg.bank) + "/memories", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          items: [{
+            content: content,
+            context: String(hbody.context || "chat").slice(0, 200),
+            timestamp: hbody.timestamp || new Date().toISOString(),
+          }],
+          async: false,
+        }),
+      }, 90000);
+      if (!r.ok) return json(res, 200, { ok: false, error: "retain 失败：" + r.text });
+      console.log("🧠 Hindsight retain：" + content.replace(/\s+/g, " ").slice(0, 50) + "…");
+      return json(res, 200, { ok: true, result: r.data });
+    }
+    if (req.method === "POST" && p === "/memory/hindsight/recall") {
+      const query = String(hbody.query || "").trim().slice(0, 500);
+      if (!query) return json(res, 400, { ok: false, error: "query 必填" });
+      const r = await hsFetch("/v1/default/banks/" + encodeURIComponent(hsCfg.bank) + "/memories/recall", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ query: query, max_tokens: Math.min(parseInt(hbody.maxTokens, 10) || 2048, 8192) }),
+      }, 30000);
+      if (!r.ok) return json(res, 200, { ok: false, error: "recall 失败：" + r.text });
+      const results = ((r.data && r.data.results) || []).map(function (x) {
+        return { id: x.id, text: x.text, type: x.type || "", mentionedAt: x.mentioned_at || "" };
+      });
+      return json(res, 200, { ok: true, results: results });
+    }
+    if (req.method === "POST" && p === "/memory/hindsight/reflect") {
+      const query = String(hbody.query || "").trim().slice(0, 500);
+      if (!query) return json(res, 400, { ok: false, error: "query 必填" });
+      const r = await hsFetch("/v1/default/banks/" + encodeURIComponent(hsCfg.bank) + "/reflect", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ query: query }),
+      }, 120000);
+      if (!r.ok) return json(res, 200, { ok: false, error: "reflect 失败：" + r.text });
+      return json(res, 200, { ok: true, text: (r.data && r.data.text) || "" });
+    }
+    if (req.method === "POST" && p === "/memory/hindsight/forget") {
+      const id = String(hbody.id || "").slice(0, 100);
+      if (!id) return json(res, 400, { ok: false, error: "id 必填" });
+      // Hindsight 的遗忘是「软退役」：PATCH state=invalidated（从召回/合成中排除，可逆）。
+      // 观察类记忆是派生的，不能直接失效——转而失效它的来源事实。
+      const inv = async function (mid) {
+        return hsFetch("/v1/default/banks/" + encodeURIComponent(hsCfg.bank) + "/memories/" + encodeURIComponent(mid), {
+          method: "PATCH",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ state: "invalidated", reason: "用户在 Lumen 记忆页遗忘" }),
+        }, 15000);
+      };
+      let r = await inv(id);
+      if (!r.ok && /observation/i.test(r.text)) {
+        try {
+          const g = await hsFetch("/v1/default/banks/" + encodeURIComponent(hsCfg.bank) + "/memories/" + encodeURIComponent(id), {}, 10000);
+          const srcs = (g.data && g.data.source_memory_ids) || [];
+          let n = 0;
+          for (const s of srcs) { const rr = await inv(s); if (rr.ok) n++; }
+          if (n) r = { ok: true, status: 200, data: null, text: "" };
+          else r = { ok: false, status: 400, data: null, text: "来源事实全部失效失败：" + r.text };
+        } catch (e) { r = { ok: false, status: 500, data: null, text: String(e.message || e) }; }
+      }
+      if (!r.ok) return json(res, 200, { ok: false, error: "遗忘失败：" + r.text });
+      console.log("🧠 Hindsight 遗忘记忆：" + id);
+      return json(res, 200, { ok: true });
+    }
+    if (req.method === "POST" && p === "/memory/hindsight/reset") {
+      const r = await hsFetch("/v1/default/banks/" + encodeURIComponent(hsCfg.bank), { method: "DELETE" }, 30000);
+      hsBankReady = false;
+      if (!r.ok && r.status !== 404) return json(res, 200, { ok: false, error: "重置失败：" + r.text });
+      console.log("🧠 Hindsight 记忆库已重置（bank " + hsCfg.bank + "）");
+      return json(res, 200, { ok: true });
+    }
+    return json(res, 404, { ok: false, error: "记忆路由不存在" });
+  }
+
   // —— 手机/局域网访问信息 ——
   if (req.method === "GET" && p === "/lan-ips") {
     const ips = [];
@@ -2680,6 +3046,7 @@ server.listen(PORT, HOST, function () {
   console.log("   技能库   " + listSkills().length + " 个内置（" + SKILLS_DIR + "）");
   console.log("   QCU 桥   POST /qcu/exec → " + QCU_BIN + "（超时 " + QCU_TIMEOUT_MS + "ms）");
   console.log("   虚拟计算机 LumenBox · /vm/exec /vm/state · 工作区 vm-home/（浏览优先在这里，不碰你的电脑）");
+  console.log("   深度记忆 Hindsight " + (hsCfg.enabled ? "已启用 · " + hsBaseUrl() + "（bank " + hsCfg.bank + "）" : "未启用（可选：设置 → 长期记忆引擎 · Hindsight）"));
   console.log("   诊断页   http://" + HOST + ":" + PORT + "/healthz");
   console.log("   停止     Ctrl+C");
   // 自动弹出浏览器（不想弹：LUMEN_NO_OPEN=1 node server.js）

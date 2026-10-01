@@ -27,3 +27,5 @@ docs/brochure/page-*.png
 # 个人启动器（本机专用，不入库）
 run.sh
 lumen-connectors.json
+# Hindsight 记忆服务本地状态（enabled/端口/库；无密钥，但属运行期产物）
+lumen-hindsight.json

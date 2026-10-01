@@ -1706,7 +1706,6 @@
     var mems = store.state.memories;
     if (!mems.length) {
       list.innerHTML = '<div class="goal-empty">Lumi 还没记住关于你的事。<br>接入模型后正常对话，它会自动沉淀值得记住的偏好、事实、关系与习惯；<br>也可以点右上角手动记一条。</div>';
-      return;
     }
     mems.forEach(function (m) {
       var card = el("div", "goal-card");
@@ -1738,6 +1737,120 @@
         updateBadges();
       }
     }, { once: true });
+    renderHsMemory();
+  }
+
+  // ———— Hindsight 深度记忆（可选）：语义检索 / 深度反思 / 记忆库管理 ————
+  function renderHsMemory() {
+    var box = $("#hs-memory-view");
+    if (!box) return;
+    box.innerHTML = "";
+    desktopApi("/memory/hindsight/status").then(function (d) {
+      if (!d || !d.ok) return;
+      if (!d.enabled && !(d.api && d.api.reachable)) {
+        box.innerHTML =
+          '<div class="goal-card" style="margin-top:18px">' +
+          '<div class="goal-head"><span class="sk-tag" style="background:#5b7f9d22;color:#5b7f9d">深度记忆</span>' +
+          '<div class="goal-title" style="flex:1">Hindsight 长期记忆引擎（未启用）</div></div>' +
+          '<div class="goal-meta"><span>给 Lumi 一个会学习的记忆库：对话自动沉淀为事实/经历/观察，回答前四路检索相关记忆（语义/关键词/图谱/时序）。开源 · 数据全在本地。</span></div>' +
+          '<div class="goal-meta"><button class="chip" type="button" data-hs-goset="1">到设置开启 →</button></div></div>';
+        var b2 = box.querySelector("[data-hs-goset]");
+        if (b2) b2.addEventListener("click", function () { openSettings("hindsight"); });
+        return;
+      }
+      var sec = el("div", "goal-card");
+      sec.style.marginTop = "18px";
+      var reach = d.api && d.api.reachable;
+      sec.innerHTML =
+        '<div class="goal-head"><span class="sk-tag" style="background:#5b7f9d22;color:#5b7f9d">深度记忆 · Hindsight</span>' +
+        '<div class="goal-title" style="flex:1">' + (reach ? "运行中" : "已启用 · 服务未响应" + (d.busy ? "（启动中…）" : "")) +
+        (d.version ? " · v" + esc(d.version) : "") + "</div></div>";
+      var q = document.createElement("input");
+      q.type = "text";
+      q.placeholder = "从记忆里找点什么…（如：我最近让你记过什么？）";
+      q.style.cssText = "flex:1;min-width:180px;border:1px solid var(--line);border-radius:10px;padding:8px 12px;font-size:13.5px;background:rgba(255,255,255,.8)";
+      var btn = el("button", "chip", "语义检索");
+      btn.type = "button";
+      var rbtn = el("button", "chip", "深度反思");
+      rbtn.type = "button";
+      var row = el("div", "set-row");
+      row.appendChild(q); row.appendChild(btn); row.appendChild(rbtn);
+      sec.appendChild(row);
+      var out = el("div");
+      out.style.cssText = "margin-top:10px;font-size:13.5px;line-height:1.9";
+      sec.appendChild(out);
+      var total = el("div", "goal-meta", reach ? "读取中…" : "");
+      sec.appendChild(total);
+      var list2 = el("div", "goals-list");
+      list2.style.marginTop = "8px";
+      sec.appendChild(list2);
+      box.appendChild(sec);
+
+      function renderList() {
+        if (!reach) { total.textContent = "服务未响应（到 设置 → 长期记忆引擎 查看原因或重启）"; return; }
+        desktopApi("/memory/hindsight/memories?limit=50").then(function (m) {
+          list2.innerHTML = "";
+          if (!m || !m.ok) { total.textContent = "记忆列表暂不可用：" + String((m && m.error) || "").slice(0, 60); return; }
+          var clearB = el("button", "chip", "清空记忆库");
+          clearB.type = "button";
+          clearB.style.marginLeft = "8px";
+          clearB.addEventListener("click", function () {
+            if (!window.confirm("清空 Hindsight 记忆库（bank " + d.bank + "）？此操作不可恢复。")) return;
+            desktopApi("/memory/hindsight/reset", "POST").then(function (r2) {
+              if (r2 && r2.ok) { store.audit("清空深度记忆库", "Hindsight bank " + d.bank, "info"); renderList(); }
+              else toast("清空失败：" + ((r2 && r2.error) || ""));
+            });
+          });
+          total.innerHTML = "";
+          total.appendChild(document.createTextNode("记忆库共 " + m.total + " 条（Hindsight 自动从对话抽取，可在「记忆页」检索/遗忘）"));
+          total.appendChild(clearB);
+          (m.items || []).forEach(function (it) {
+            var card = el("div", "goal-card");
+            var when = it.mentionedAt ? new Date(it.mentionedAt).toLocaleDateString("zh-CN") : "";
+            card.innerHTML =
+              '<div class="goal-head"><span class="sk-tag" style="background:#5b7f9d22;color:#5b7f9d">' + esc(it.type || "记忆") + "</span>" +
+              '<div class="goal-title" style="flex:1">' + esc(it.text) + "</div></div>" +
+              '<div class="goal-meta"><span>🧠 ' + (when ? when + " · " : "") + "Hindsight</span>" +
+              '<span><button class="chip" type="button" data-hs-del="' + esc(it.id) + '">遗忘</button></span></div>';
+            card.querySelector("[data-hs-del]").addEventListener("click", function () {
+              desktopApi("/memory/hindsight/forget", "POST", { id: it.id }).then(function (r3) {
+                if (r3 && r3.ok) { store.audit("遗忘深度记忆", String(it.text).slice(0, 40), "info"); renderList(); }
+                else toast("遗忘失败：" + ((r3 && r3.error) || ""));
+              });
+            });
+            list2.appendChild(card);
+          });
+        });
+      }
+      renderList();
+
+      function runSearch() {
+        var query = q.value.trim();
+        if (!query) { toast("先输入要检索的内容"); return; }
+        out.textContent = "检索中…";
+        desktopApi("/memory/hindsight/recall", "POST", { query: query }).then(function (r) {
+          if (!r || !r.ok) { out.textContent = ""; toast("检索失败：" + ((r && r.error) || "服务未响应")); return; }
+          var rs = (r.results || []).filter(function (x) { return x && x.text; });
+          out.innerHTML = rs.length
+            ? "召回 " + rs.length + " 条：<br>" + rs.map(function (x) { return "· [" + esc(x.type || "记忆") + "] " + esc(x.text); }).join("<br>")
+            : "没有召回相关记忆（记忆库还空着？正常聊几轮就会有了）";
+        });
+      }
+      btn.addEventListener("click", runSearch);
+      q.addEventListener("keydown", function (e) { if (e.key === "Enter") runSearch(); });
+      rbtn.addEventListener("click", function () {
+        openForm("深度反思 · 基于记忆库回答", [
+          { key: "query", label: "问题", placeholder: "比如：我这段时间都关注些什么？" },
+        ], function (vals) {
+          if (!vals.query) return "问题不能为空";
+          out.textContent = "反思中…（Hindsight 会多步检索记忆后作答，稍等）";
+          desktopApi("/memory/hindsight/reflect", "POST", { query: vals.query }).then(function (r) {
+            if (!r || !r.ok) { out.textContent = ""; toast("反思失败：" + ((r && r.error) || "")); return; }
+            out.innerHTML = "💡 深度反思：<br>" + md(r.text);
+          });
+        });
+      });
+    }).catch(function () { /* 服务桥离线：区块不渲染 */ });
   }
 
   function openAddMemory() {
@@ -2514,6 +2627,86 @@
     }
     desktopApi("/connectors").then(function (d) { if (d && d.ok) refreshConnChips(d); });
     body.appendChild(secConn);
+
+    // —— 长期记忆引擎 · Hindsight（可选 · 开源记忆系统，本地 Docker） ——
+    var secHs = el("div", "set-section");
+    secHs.appendChild(el("h3", "", "长期记忆引擎 · Hindsight（可选 · 数据不出本机）"));
+    var hsBox = el("div");
+    hsBox.style.cssText = "font-size:13px;color:var(--ink-soft);line-height:1.9";
+    secHs.appendChild(hsBox);
+    var hsBtns = el("div", "set-row");
+    var hsPolling = false;
+    function renderHs() {
+      desktopApi("/memory/hindsight/status?deep=1").then(function (d) {
+        if (!d || !d.ok) { hsBox.textContent = "（服务桥离线）"; hsBtns.innerHTML = ""; return; }
+        hsBtns.innerHTML = "";
+        var reach = d.api && d.api.reachable;
+        var stateTxt = d.busy ? "⏳ 启动中…（首次拉取镜像可能需要几分钟）"
+          : reach ? "✅ 运行中 · <code>" + esc(d.url) + "</code> · 记忆库 <code>" + esc(d.bank) + "</code>" + (d.version ? " · v" + esc(d.version) : "")
+          : d.enabled ? "⚠️ 已启用但服务未响应" + (d.lastError ? "：" + esc(String(d.lastError).slice(0, 80)) : "")
+          : "○ 未启用";
+        var bits = [];
+        if (d.managed) bits.push(d.docker ? "Docker ✅" : "Docker ❌（未安装或未启动）");
+        else bits.push("自建服务模式（LUMEN_HINDSIGHT_URL）");
+        if (d.container) bits.push("容器 " + esc(d.container));
+        if (d.llm) bits.push(d.llm.ok ? "LLM 探测 ✅" : "LLM 探测 ❌ " + esc(String(d.llm.detail || "").slice(0, 50)));
+        if (d.memories != null) bits.push("记忆 " + d.memories + " 条");
+        hsBox.innerHTML =
+          "<div>" + stateTxt + "</div>" +
+          '<div style="font-size:12.5px;color:var(--ink-faint)">' + bits.join(" · ") + "</div>" +
+          '<div style="font-size:12.5px;color:var(--ink-faint)">开启后：对话自动沉淀入记忆库、回答前自动召回相关记忆；「记忆」页可语义检索、深度反思、逐条遗忘。抽取事实用的模型取 <code>LUMEN_HINDSIGHT_LLM_*</code>，缺省复用 <code>LUMEN_MODEL_*</code>；数据存本地 Docker 卷 <code>lumen-hindsight-data</code>。</div>';
+        if (d.uiUrl) {
+          var uiA = document.createElement("a");
+          uiA.className = "chip";
+          uiA.textContent = "打开 Hindsight 控制台";
+          uiA.href = d.uiUrl; uiA.target = "_blank"; uiA.rel = "noopener";
+          hsBtns.appendChild(uiA);
+        }
+        if (!reach) {
+          var startB = el("button", "chip solid", d.busy ? "启动中…" : (d.enabled ? "重试启动" : "启用并启动"));
+          startB.type = "button";
+          startB.disabled = !!d.busy;
+          startB.addEventListener("click", function () {
+            startB.disabled = true;
+            hsBox.innerHTML = "⏳ 启动中…（首次拉取镜像可能需要几分钟，可点「刷新」看进度）";
+            desktopApi("/memory/hindsight/start", "POST").then(function () {
+              store.audit("启用 Hindsight 深度记忆", "Docker 容器 lumen-hindsight", "info");
+              if (window.LumenHindsight) window.LumenHindsight.invalidate();
+              if (hsPolling) return;
+              hsPolling = true;
+              var n = 0;
+              var iv = setInterval(function () {
+                renderHs();
+                if (++n > 40) { clearInterval(iv); hsPolling = false; }
+              }, 4000);
+            });
+          });
+          hsBtns.appendChild(startB);
+        } else {
+          var stopB = el("button", "chip", "停止并停用");
+          stopB.type = "button";
+          stopB.addEventListener("click", function () {
+            desktopApi("/memory/hindsight/stop", "POST").then(function () {
+              store.audit("停用 Hindsight 深度记忆", "", "info");
+              if (window.LumenHindsight) window.LumenHindsight.invalidate();
+              renderHs();
+            });
+          });
+          hsBtns.appendChild(stopB);
+        }
+        var reB = el("button", "chip", "刷新");
+        reB.type = "button";
+        reB.addEventListener("click", function () { renderHs(); });
+        hsBtns.appendChild(reB);
+      });
+    }
+    renderHs();
+    secHs.appendChild(hsBtns);
+    secHs.insertAdjacentHTML("beforeend",
+      '<div style="font-size:12.5px;color:var(--ink-faint);margin-top:8px;line-height:1.9">' +
+      "Hindsight（<a href=\"https://github.com/vectorize-io/hindsight\" target=\"_blank\" rel=\"noopener\">vectorize-io/hindsight</a>，MIT）是开源的 Agent 记忆系统：retain 抽取事实、recall 四路检索（语义/关键词/图谱/时序）、reflect 基于记忆回顾。Lumen 的接入是<b>可选层</b>——不启用时本地轻量记忆照常工作。</div>");
+    body.appendChild(secHs);
+    if (focus === "hindsight") secHs.scrollIntoView({ behavior: "smooth", block: "start" });
 
     // —— 连接器（真实能力映射 + 读写权限粒度）——
     var sec4 = el("div", "set-section");

@@ -108,6 +108,36 @@
       .catch(function (e) { return { ok: false, error: String(e && e.message || e) }; });
   }
 
+  // —— Hindsight 深度记忆（可选 · 服务桥 /memory/hindsight/* 代理）——
+  // enabled 状态带 60s 缓存：服务关闭时每分钟最多探测一次，不拖慢对话
+  var hsCache = { at: 0, on: false };
+  function hsActive() {
+    if (Date.now() - hsCache.at < 60000) return Promise.resolve(hsCache.on);
+    return fetch(bridgeBase() + "/memory/hindsight/status").then(function (r) { return r.json(); })
+      .then(function (d) {
+        hsCache = { at: Date.now(), on: !!(d && d.enabled && d.api && d.api.reachable) };
+        return hsCache.on;
+      }).catch(function () { hsCache = { at: Date.now(), on: false }; return false; });
+  }
+  function hsRecall(query, task) {
+    return fetch(bridgeBase() + "/memory/hindsight/recall", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ query: query, maxTokens: 1536 }),
+      signal: task ? task.controller.signal : undefined,
+    }).then(function (r) { return r.json(); })
+      .catch(function (e) { return { ok: false, error: String(e && e.message || e) }; });
+  }
+  function hsRetain(content, context) {
+    return fetch(bridgeBase() + "/memory/hindsight/retain", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ content: content, context: context || "chat" }),
+    }).then(function (r) { return r.json(); })
+      .catch(function (e) { return { ok: false, error: String(e && e.message || e) }; });
+  }
+  window.LumenHindsight = { invalidate: function () { hsCache.at = 0; } };
+
   // —— 应用连接（飞书/Lark · Google 邮件日历）：真实 API 动作，优先于演示流 ——
   var CONNECTOR_LABELS = {
     "lark.send": "发送飞书消息", "lark.doc": "创建飞书文档", "lark.event": "创建飞书日程",
@@ -1529,6 +1559,22 @@
       });
     });
 
+    // —— 第 1.7 幕：深度记忆召回（Hindsight 开启时，检索相关记忆注入作答）——
+    chain = chain.then(function () {
+      if (task.aborted) return;
+      if (!window.LumenAI.current()) return; // 演示模式没有模型作答，无需检索
+      return hsActive().then(function (on) {
+        if (!on || task.aborted) return;
+        return hsRecall(text, task).then(function (d) {
+          if (task.aborted || !d || !d.ok) return;
+          var mems = (d.results || []).filter(function (m) { return m && m.text; });
+          if (!mems.length) return;
+          ctx.hsMemories = mems.slice(0, 10);
+          store.audit("Hindsight 记忆召回", "命中 " + ctx.hsMemories.length + " 条", "info");
+        }).catch(function () { /* 记忆服务不在线不影响对话 */ });
+      });
+    });
+
     // —— 第 2 幕：作答（真实模型流式 / 演示引擎打字机）——
     chain = chain.then(function () {
       if (task.aborted) return;
@@ -1566,6 +1612,10 @@
         }
         if (ctx.evidence) {
           messages.push({ role: "system", content: "以下是刚刚联网检索到的真实资料（含来源链接）。作答必须以此为准，标注来源编号，检索未覆盖的信息要明说「未检索到」：" + ctx.evidence });
+        }
+        if (ctx.hsMemories) {
+          messages.push({ role: "system", content: "以下是从长期记忆（Hindsight）检索到的与本次对话相关的记忆（自然运用，勿生硬复述；若与用户当前所说冲突，以用户为准）：\n" +
+            ctx.hsMemories.map(function (m) { return "· [" + (m.type || "记忆") + "] " + m.text; }).join("\n") });
         }
         store.audit("调用模型", cfg.name + " · " + cfg.model, "info");
         var acc = "";
@@ -1722,6 +1772,20 @@
           }
         } catch (e) { /* 解析失败静默 */ }
       }).catch(function () { /* 记忆提取失败不影响任务 */ });
+    });
+
+    // —— 第 4.5 幕：Hindsight 深度记忆沉淀（原始对话交给它抽取事实/经历/观察）——
+    chain = chain.then(function () {
+      if (task.aborted) return;
+      if (!ctx.modelAnswer && !ctx.computerSummary && !ctx.connectorResult) return;
+      return hsActive().then(function (on) {
+        if (!on) return;
+        var answer = String(ctx.modelAnswer || ctx.connectorResult && ctx.connectorResult.text || ctx.computerSummary || "");
+        var content = "用户：" + text + "\n\nLumi：" + answer.slice(0, 2500);
+        return hsRetain(content, "对话 · " + intent).then(function (d) {
+          if (d && d.ok) store.audit("Hindsight 记忆沉淀", "本轮对话已入长期记忆库", "done");
+        }).catch(function () { /* 沉淀失败不影响任务 */ });
+      });
     });
 
     // —— 收尾 ——

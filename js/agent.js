@@ -1307,7 +1307,9 @@
         var history = conv.messages
           .filter(function (m) { return (m.role === "user" || m.role === "agent") && m.text && m.id !== reply.id; })
           .slice(-12)
-          .map(function (m) { return { role: m.role === "agent" ? "assistant" : "user", content: m.text }; });
+          .map(function (m) {
+            return { role: m.role === "agent" ? "assistant" : "user", content: m.text + (m.attachText || "") };
+          });
         var messages = [{ role: "system", content: systemPrompt() }].concat(history);
         if (ctx.computerSummary) {
           messages.push({ role: "system", content: "（电脑操作执行摘要，作答时请参考）" + ctx.computerSummary });

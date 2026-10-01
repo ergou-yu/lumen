@@ -479,7 +479,9 @@
         : Promise.resolve("【附件：" + f.name + "（" + fmtSize(f.size) + "，非文本或较大，已存入虚拟工作区——可让 Lumi 用虚拟计算机读取）】");
       return Promise.all([up, inline]).then(function (r) { return r[1]; });
     })).then(function (parts) {
-      dispatch([baseText].concat(parts).join("\n\n"));
+      // 附件正文存到消息的独立字段：气泡保持干净，模型历史里能看到全文（agent.js 组装上下文时拼接）
+      store.updateMessage(m.id, { attachText: parts.join("\n\n") });
+      dispatch(baseText);
     });
   }
 

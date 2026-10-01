@@ -451,6 +451,7 @@
     list.appendChild(node);
     scrollBottom(true);
     $("#input").value = "";
+    try { localStorage.removeItem("lumen-draft"); } catch (e) {}
     autosize();
     window.LumenAgent.runTask(text, hooks);
     if (currentTab !== "chat") switchTab("chat"); // 已在聊天页时不重放转场动画
@@ -554,7 +555,12 @@
 
   function bindComposer() {
     var ta = $("#input");
-    ta.addEventListener("input", autosize);
+    // 草稿持久化：页面重载（如后台更新）不再吞掉正在输入的内容
+    try { ta.value = localStorage.getItem("lumen-draft") || ""; if (ta.value) autosize(); } catch (e) {}
+    ta.addEventListener("input", function () {
+      autosize();
+      try { localStorage.setItem("lumen-draft", ta.value); } catch (e) {}
+    });
     ta.addEventListener("keydown", function (e) {
       if (e.key === "Enter" && !e.shiftKey && !e.isComposing) {
         e.preventDefault();

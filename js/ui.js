@@ -1160,6 +1160,41 @@
     });
   }
 
+  // 工作区文件在线编辑（对齐 Muse「VM 内文件可编辑」：改完直接存回虚拟工作区）
+  function editVmFile(name) {
+    vmApi("files", "read", { name: name }).then(function (r) {
+      if (!r || !r.ok) { toast("读取失败：" + (r && r.error || "")); return; }
+      var title = document.querySelector("#viewer-title");
+      var body = document.querySelector("#viewer-body");
+      title.textContent = "编辑 · " + name;
+      body.innerHTML = "";
+      var ta = document.createElement("textarea");
+      ta.value = r.content || "";
+      ta.style.cssText = "width:100%;height:56vh;min-height:320px;border:1px solid var(--line);border-radius:10px;padding:12px 14px;font-family:ui-monospace,Menlo,monospace;font-size:13px;line-height:1.7;background:rgba(255,255,255,.9);color:var(--ink);resize:vertical";
+      var bar = el("div", "vm-toolbar");
+      var save = el("button", "chip allow", "保存回虚拟工作区");
+      save.type = "button";
+      save.addEventListener("click", function () {
+        vmApi("files", "write", { name: name, content: ta.value }).then(function (w) {
+          if (w && w.ok) {
+            store.audit("编辑工作区文件", name, "done");
+            toast("已保存 " + name);
+            closeViewer();
+            if (currentTab === "computer") renderVm();
+          } else toast("保存失败：" + (w && w.error || ""));
+        });
+      });
+      var cancel = el("button", "chip", "取消");
+      cancel.type = "button";
+      cancel.addEventListener("click", closeViewer);
+      bar.appendChild(save);
+      bar.appendChild(cancel);
+      body.appendChild(ta);
+      body.appendChild(bar);
+      document.querySelector("#viewer-modal").hidden = false;
+    });
+  }
+
   function renderVm(loading) {
     var box = $("#vm-view");
     if (!box) return;
@@ -1266,6 +1301,9 @@
             var base = bridgeBase();
             window.open(base + "/vm/file/" + encodeURIComponent(f.name), "_blank");
           });
+          var ed = el("button", "chip", "编辑");
+          ed.type = "button";
+          ed.addEventListener("click", function () { editVmFile(f.name); });
           var rm = el("button", "chip", "删除");
           rm.type = "button";
           rm.addEventListener("click", function () {
@@ -1275,13 +1313,44 @@
             });
           });
           row.appendChild(dl);
+          row.appendChild(ed);
           row.appendChild(rm);
           fl.appendChild(row);
         });
         fc.appendChild(fl);
       } else {
-        fc.appendChild(el("div", "vm-empty", "工作区是空的。Lumi 浏览后会把笔记存到这里（notes/）。"));
+        fc.appendChild(el("div", "vm-empty", "工作区是空的。Lumi 浏览后会把笔记存到这里（notes/）；虚拟机浏览器下载的文件也会落到这里。"));
       }
+      // 上传：本地文件 → 虚拟工作区（对齐 Muse「用户可把文件放进 VM」）
+      var upRow = el("div", "vm-toolbar");
+      var upInput = document.createElement("input");
+      upInput.type = "file";
+      upInput.hidden = true;
+      upInput.addEventListener("change", function () {
+        var file = upInput.files && upInput.files[0];
+        if (!file) return;
+        if (file.size > 20 * 1024 * 1024) { toast("文件超过 20MB"); return; }
+        file.arrayBuffer().then(function (buf) {
+          return fetch(bridgeBase() + "/vm/file/upload?name=" + encodeURIComponent(file.name), {
+            method: "POST",
+            headers: { "Content-Type": "application/octet-stream" },
+            body: buf,
+          }).then(function (r) { return r.json(); });
+        }).then(function (r) {
+          if (r && r.ok) {
+            store.audit("上传文件到虚拟工作区", file.name + " · " + fmtSize(file.size), "done");
+            toast("已上传 " + file.name + "（代理和虚拟机都能用了）");
+            renderVm();
+          } else toast("上传失败：" + (r && r.error || ""));
+        }).catch(function () { toast("上传失败（服务桥离线？）"); });
+        upInput.value = "";
+      });
+      var upBtn = el("button", "chip solid", "⬆ 上传文件到虚拟机");
+      upBtn.type = "button";
+      upBtn.addEventListener("click", function () { upInput.click(); });
+      upRow.appendChild(upBtn);
+      upRow.appendChild(upInput);
+      fc.appendChild(upRow);
       box.appendChild(fc);
 
       // —— 虚拟终端 ——

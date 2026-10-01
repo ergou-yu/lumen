@@ -21,12 +21,16 @@ RUN sed -i 's|deb.debian.org|mirrors.ustc.edu.cn|g; s|security.debian.org|mirror
 RUN apt-get install -y --no-install-recommends -o Acquire::Retries=10 \
       chromium fonts-noto-cjk
 
-# 其余依赖一层
+# 其余依赖一层（含中文 locale：否则浏览器下载的中文文件名会退化为 "download"）
 RUN apt-get install -y --no-install-recommends -o Acquire::Retries=10 \
       xvfb xauth x11-utils xdotool imagemagick \
       x11vnc novnc websockify openbox \
-      fonts-noto-color-emoji ca-certificates \
+      fonts-noto-color-emoji ca-certificates locales \
+    && sed -i 's/^# \(zh_CN.UTF-8 UTF-8\)/\1/; s/^# \(en_US.UTF-8 UTF-8\)/\1/' /etc/locale.gen \
+    && locale-gen \
     && rm -rf /var/lib/apt/lists/*
+
+ENV LANG=zh_CN.UTF-8 LC_ALL=zh_CN.UTF-8
 
 COPY box-server.js /opt/box/box-server.js
 COPY entrypoint.sh /opt/box/entrypoint.sh

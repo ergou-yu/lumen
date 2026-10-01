@@ -785,8 +785,12 @@ async function vmBrowserExec(op, arg) {
 // —— 虚拟文件系统：一切囚于 vm-home/，禁止任何形式的越界 ——
 function vmSafeName(name) {
   const n = String(name || "").trim();
-  if (!/^[A-Za-z0-9_\-.\u4e00-\u9fff][A-Za-z0-9_\-.\u4e00-\u9fff \/]{0,120}$/.test(n)) return null;
-  if (/\.\./.test(n) || n.startsWith(".") || n.endsWith("/")) return null;
+  // 只拦真正危险的：控制字符、反斜杠与保留字符、.. 穿越、隐藏段；
+  // 中文、空格、括号（浏览器重名会生成 "(1)"）等一律放行
+  if (!n || n.length > 160) return null;
+  if (/[\u0000-\u001f\\:*?"<>|]/.test(n)) return null;
+  const segs = n.split("/");
+  if (segs.some(seg => !seg || seg === "." || seg === ".." || seg.startsWith("."))) return null;
   const full = path.resolve(VM_HOME, n);
   if (full !== VM_HOME && full.indexOf(VM_HOME + path.sep) !== 0) return null;
   return full;
@@ -1138,7 +1142,10 @@ function sentinelReview(action, observeCtx) {
     let u;
     try { u = new URL(a.url); } catch (e) { return { verdict: "block", reason: "地址不合法" }; }
     if (!/^https?:$/.test(u.protocol)) return { verdict: "block", reason: "仅允许 http(s)" };
-    if (isPrivateHost(u.hostname)) return { verdict: "block", reason: "SSRF 拦截：私网/回环地址禁止访问" };
+    // 豁免：容器内浏览器访问宿主上的本服务桥（host.docker.internal:自身端口）——
+    // 这是「下载直通」等本地能力的合法通道；其余私网地址仍然全部拦截
+    const isLocalBridge = u.hostname === "host.docker.internal" && (u.port === String(PORT) || (u.port === "" && PORT === "80"));
+    if (isPrivateHost(u.hostname) && !isLocalBridge) return { verdict: "block", reason: "SSRF 拦截：私网/回环地址禁止访问" };
     for (const re of DENYLIST) if (re.test(u.href)) return { verdict: "block", reason: "命中恶意站点拦截名单" };
     return { verdict: "allow", reason: "导航到 " + u.hostname };
   }
@@ -1273,6 +1280,9 @@ async function boxStart() {
       "--shm-size", "512m", "--tmpfs", "/tmp:rw,size=128m",
       "--init", "--restart", "unless-stopped",
       "-v", "lumen-box-home:/home/node",
+      // 下载直通：容器浏览器的下载目录 = 宿主 vm-home（「计算机」页实时可见、可下载；
+      // 反向上传到 vm-home 的文件也会出现在容器 Downloads 里供代理使用）
+      "-v", path.join(VM_HOME, "") + ":/home/node/Downloads",
       "-p", "127.0.0.1::3900", "-p", "127.0.0.1::6901",
       BOX_IMAGE], 60000);
     if (!r.ok) { box.state = "stopped"; return { ok: false, error: "容器启动失败：" + r.err.slice(0, 400) }; }
@@ -1894,9 +1904,9 @@ const server = http.createServer(async function (req, res) {
   // 防止任意网页（含沙箱 iframe 的伪造 null Origin）触达 127.0.0.1 操控虚拟机。
   const MUTATING_BOX_ROUTES = new Set([
     "/vm/desktop/start", "/vm/desktop/stop", "/vm/desktop/build", "/vm/desktop/act",
-    "/sentinel/decide", "/vm/vault/set", "/vm/vault/del", "/update/apply",
+    "/sentinel/decide", "/vm/vault/set", "/vm/vault/del", "/update/apply", "/vm/file/upload",
   ]);
-  if (p.indexOf("/vm/desktop/") === 0 || p.indexOf("/vm/vault") === 0 || p.indexOf("/sentinel/") === 0) {
+  if (p.indexOf("/vm/desktop/") === 0 || p.indexOf("/vm/vault") === 0 || p.indexOf("/sentinel/") === 0 || p === "/vm/file/upload") {
     const origin = req.headers["origin"];
     const sameOrigin = !origin || origin === "http://127.0.0.1:" + PORT || origin === "http://localhost:" + PORT;
     if (!sameOrigin && !(origin === "null" && req.method === "GET" && !MUTATING_BOX_ROUTES.has(p))) {
@@ -2069,6 +2079,25 @@ const server = http.createServer(async function (req, res) {
     return json(res, 200, { ok: true, vault: vaultPublic() });
   }
 
+  const vmUpload = p === "/vm/file/upload";
+  if (req.method === "POST" && vmUpload) {
+    // 上传文件进虚拟工作区：?name= 文件名（raw body 为文件内容，≤20MB）
+    let name;
+    try { name = decodeURIComponent(u.searchParams.get("name") || ""); } catch (e) { name = ""; }
+    name = path.basename(String(name || "").trim()); // 只取文件名，禁止路径
+    if (!name || name.startsWith(".")) return json(res, 400, { ok: false, error: "name 必填（纯文件名）" });
+    try {
+      const body = await readBody(req, 20 * 1024 * 1024);
+      if (!body.length) return json(res, 400, { ok: false, error: "文件内容为空" });
+      const full = vmSafeName(name);
+      if (!full) return json(res, 400, { ok: false, error: "文件名非法" });
+      fs.writeFileSync(full, body);
+      console.log("📥 上传进虚拟工作区：" + name + "（" + body.length + " B）");
+      return json(res, 200, { ok: true, name: name, bytes: body.length, files: vmFilesExec("ls").files });
+    } catch (e) {
+      return json(res, e.message === "body 超限" ? 413 : 500, { ok: false, error: "上传失败：" + e.message });
+    }
+  }
   const vmFileMatch = p.match(/^\/vm\/file\/(.+)$/);
   if (req.method === "GET" && vmFileMatch) {
     // 工作区文件下载（严格囚于 vm-home；名字 encodeURIComponent 编码，兼容 %2F 与多段两种形式）
@@ -2082,7 +2111,8 @@ const server = http.createServer(async function (req, res) {
     res.writeHead(200, Object.assign({
       "Content-Type": "application/octet-stream",
       "Content-Length": st.size,
-      "Content-Disposition": "attachment; filename*=UTF-8''" + encodeURIComponent(path.basename(full)),
+      // RFC 6266：ASCII 回退名 + UTF-8 扩展名，两者都给（部分 Chromium 只认组合）
+      "Content-Disposition": "attachment; filename=\"lumen-file\"; filename*=UTF-8''" + encodeURIComponent(path.basename(full)),
     }, CORS));
     return fs.createReadStream(full).pipe(res);
   }

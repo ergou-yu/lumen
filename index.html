@@ -12,6 +12,15 @@
   动效来自 per-char-reveal / fade-slide-route / ken-burns / noise-grain 四个片段。
 -->
 <link rel="stylesheet" href="css/lumen.css">
+<!-- iOS 主屏幕应用化：添加到主屏幕后全屏运行、带独立图标 -->
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="apple-mobile-web-app-title" content="Lumen">
+<meta name="theme-color" content="#101418">
+<link rel="apple-touch-icon" href="/assets/apple-touch-icon.png">
+<link rel="icon" type="image/png" sizes="180x180" href="/assets/apple-touch-icon.png">
+<link rel="manifest" href="/assets/manifest.webmanifest">
 </head>
 <body>
 
@@ -273,6 +282,7 @@
 <script src="js/monet-bg.js"></script>
 <script src="js/store.js"></script>
 <script src="js/providers.js"></script>
+<script src="js/qrcode.js"></script>
 <script src="js/agent.js"></script>
 <script src="js/ui.js"></script>
 <script>window.addEventListener('DOMContentLoaded', function(){ LumenUI.init(); });</script>

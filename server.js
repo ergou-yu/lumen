@@ -223,6 +223,7 @@ const MIME = {
   ".ico": "image/x-icon",
   ".woff2": "font/woff2",
   ".txt": "text/plain; charset=utf-8",
+  ".webmanifest": "application/manifest+json; charset=utf-8",
 };
 
 // 只放行应用自身的前端资源目录（skills/ 走 /skills API，不在此暴露）
@@ -2209,7 +2210,15 @@ const server = http.createServer(async function (req, res) {
         if (it.family === "IPv4" && !it.internal) ips.push(it.address);
       }
     }
-    return json(res, 200, { ok: true, host: HOST, open: HOST === "0.0.0.0", urls: ips.map(ip => "http://" + ip + ":" + PORT) });
+    // mDNS 主机名（Mac 局域网默认可用；iOS 原生支持 .local 解析，无需记 IP）
+    let mdns = "";
+    try {
+      const h = os.hostname().toLowerCase().replace(/\.local$/, "");
+      if (h && /^[a-z0-9][a-z0-9-]*$/.test(h)) mdns = "http://" + h + ".local:" + PORT;
+    } catch (e) {}
+    const urls = ips.map(ip => "http://" + ip + ":" + PORT);
+    if (mdns) urls.unshift(mdns);
+    return json(res, 200, { ok: true, host: HOST, open: HOST === "0.0.0.0", urls, mdns });
   }
 
   // —— 版本与更新 ——

@@ -2498,12 +2498,45 @@
     desktopApi("/lan-ips").then(function (d) {
       if (!d || !d.ok) { mobBox.textContent = "（服务桥离线）"; return; }
       if (!d.open) {
-        mobBox.innerHTML = "当前只监听本机（127.0.0.1）。想让手机访问：停掉服务桥，改用<br><code>LUMEN_HOST=0.0.0.0 node server.js</code>（或 <code>sh run.sh</code> 前加 <code>LUMEN_HOST=0.0.0.0</code>）启动，然后手机连同一 WiFi 扫下面地址。";
+        mobBox.innerHTML = "当前只监听本机（127.0.0.1）。想让手机访问：停掉服务桥，改用<br><code>LUMEN_HOST=0.0.0.0 node server.js</code>（或 <code>sh run.sh</code> 前加 <code>LUMEN_HOST=0.0.0.0</code>）启动，然后手机连同一 WiFi 打开下面地址。";
         return;
       }
-      mobBox.innerHTML = "✅ 已开放局域网。手机连同一 WiFi，浏览器打开：<br>" +
-        (d.urls || []).map(function (u) { return '<div style="font-family:ui-monospace;font-size:15px;margin:4px 0">' + u + "</div>"; }).join("") +
-        '<div style="font-size:12px;color:#9a6b1a;margin-top:6px">⚠ 局域网内任何设备都可访问本服务桥（含凭证安全区接口），仅在你信任的家庭/办公 WiFi 下开放。</div>';
+      var urls = d.urls || [];
+      var qrUrl = urls[0] || "";
+      var cv = el("canvas");
+      var qrOk = !!(qrUrl && window.LumenQR && (function () {
+        var m = window.LumenQR.encode(qrUrl);
+        if (!m) return false;
+        var QZ = 4, SC = 8, N = m.length; // 4 模块静区 + 8px/模块，保证扫码器识别
+        cv.width = cv.height = (N + QZ * 2) * SC;
+        var ctx = cv.getContext("2d");
+        ctx.fillStyle = "#fff"; ctx.fillRect(0, 0, cv.width, cv.height);
+        ctx.fillStyle = "#14181d";
+        for (var r = 0; r < N; r++) for (var c = 0; c < N; c++) {
+          if (m[r][c]) ctx.fillRect((c + QZ) * SC, (r + QZ) * SC, SC, SC);
+        }
+        return true;
+      })());
+      var html = "✅ 已开放局域网。手机连同一 WiFi，浏览器打开：" +
+        urls.map(function (u, i) {
+          var tag = (i === 0 && d.mdns) ? ' <span style="font-size:11px;color:var(--ink-faint)">（iPhone 直接可用）</span>' : "";
+          return '<div style="font-family:ui-monospace;font-size:15px;margin:4px 0">' + u + tag + "</div>";
+        }).join("");
+      html += '<div id="mob-qr-row" style="display:flex;gap:16px;align-items:flex-start;margin-top:10px;flex-wrap:wrap">';
+      html += '<div style="flex:1;min-width:220px">';
+      html += '<div>📱 <b>iPhone</b>：' + (qrOk ? "相机扫码" : "Safari 打开上面地址") + ' → 底部「分享」→「添加到主屏幕」。之后从主屏幕图标进入即是全屏 App，不用再记地址。</div>';
+      html += '<div style="margin-top:4px">🤖 安卓：Chrome 打开地址 → 菜单「添加到主屏幕」，效果相同。</div>';
+      html += '<div style="font-size:12px;color:#9a6b1a;margin-top:6px">⚠ 局域网内任何设备都可访问本服务桥（含凭证安全区接口），仅在你信任的家庭/办公 WiFi 下开放。</div>';
+      html += "</div></div>";
+      mobBox.innerHTML = html;
+      if (qrOk) {
+        cv.style.cssText = "width:148px;height:148px;border-radius:12px;box-shadow:0 2px 12px rgba(0,0,0,.35);display:block";
+        var wrap = document.createElement("div");
+        wrap.style.cssText = "flex:none;text-align:center";
+        wrap.appendChild(cv);
+        wrap.insertAdjacentHTML("beforeend", '<div style="font-size:11.5px;color:var(--ink-faint);margin-top:4px">相机扫码直达</div>');
+        mobBox.querySelector("#mob-qr-row").insertBefore(wrap, mobBox.querySelector("#mob-qr-row").firstChild);
+      }
     }).catch(function () { mobBox.textContent = "（服务桥离线）"; });
     body.appendChild(secMobile);
 

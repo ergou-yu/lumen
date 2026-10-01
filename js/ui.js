@@ -440,12 +440,15 @@
 
   function send(text) {
     text = (text || "").trim();
-    if (!text) return;
-    // 移除欢迎屏（若在）
+    var files = pendingFiles.splice(0, pendingFiles.length);
+    renderAttachBar();
+    if (!text && !files.length) return;
+
+    var display = text + (files.length ? "\n\n" + files.map(function (f) { return "📎 " + f.name; }).join("  ") : "");
     var list = $("#chat-list");
     var w = list.querySelector(".welcome");
     if (w) w.remove();
-    var m = store.addMessage({ role: "user", text: text });
+    var m = store.addMessage({ role: "user", text: display });
     var node = messageNode(m);
     msgDom[m.id] = node;
     list.appendChild(node);
@@ -453,8 +456,31 @@
     $("#input").value = "";
     try { localStorage.removeItem("lumen-draft"); } catch (e) {}
     autosize();
-    window.LumenAgent.runTask(text, hooks);
-    if (currentTab !== "chat") switchTab("chat"); // 已在聊天页时不重放转场动画
+
+    var baseText = text || "（请查看我发来的附件）";
+    function dispatch(modelText) {
+      window.LumenAgent.runTask(modelText, hooks);
+      if (currentTab !== "chat") switchTab("chat"); // 已在聊天页时不重放转场动画
+    }
+
+    if (!files.length) { dispatch(baseText); return; }
+
+    // 附件：① 副本上传进虚拟工作区（代理与虚拟机都能用）
+    //       ② 文本类（≤200KB）读出内容直接拼进模型可见文本——等读完再分发，绝不丢内容
+    Promise.all(files.map(function (f) {
+      var up = uploadFile(f).then(function (r) {
+        if (r && r.ok) store.audit("聊天附件入工作区", f.name + " · " + fmtSize(f.size), "done");
+        else toast("附件《" + f.name + "》上传失败：" + (r && r.error || ""));
+      }).catch(function () { toast("附件《" + f.name + "》上传失败（服务桥离线？）"); });
+      var ext = (f.name.split(".").pop() || "");
+      var inline = (TEXT_EXT.test(ext) && f.size <= 200 * 1024)
+        ? f.text().then(function (c) { return "【附件：" + f.name + "】\n" + String(c).slice(0, 6000); })
+            .catch(function () { return "【附件：" + f.name + "（内容读取失败，已存入虚拟工作区）】"; })
+        : Promise.resolve("【附件：" + f.name + "（" + fmtSize(f.size) + "，非文本或较大，已存入虚拟工作区——可让 Lumi 用虚拟计算机读取）】");
+      return Promise.all([up, inline]).then(function (r) { return r[1]; });
+    })).then(function (parts) {
+      dispatch([baseText].concat(parts).join("\n\n"));
+    });
   }
 
   // 活动中的消息对象登记表：任务运行期间用户切了新会话时，
@@ -553,8 +579,80 @@
     ta.style.height = Math.min(ta.scrollHeight, 132) + "px";
   }
 
+  // —— 聊天附件：文件随消息进虚拟工作区；文本类同时把内容喂给模型 ——
+  var pendingFiles = [];
+  var TEXT_EXT = /^(txt|md|markdown|json|csv|tsv|log|xml|yml|yaml|html?|js|mjs|css|py|sh|java|c|h|cpp|go|rs|ts|tsx|jsx|sql|ini|conf|env|toml)$/i;
+  var attachInput = null;
+
+  function renderAttachBar() {
+    var bar = $("#attach-bar");
+    if (!pendingFiles.length) { bar.hidden = true; bar.innerHTML = ""; return; }
+    bar.hidden = false;
+    bar.innerHTML = "";
+    pendingFiles.forEach(function (f, i) {
+      var chip = el("span", "attach-chip");
+      chip.innerHTML = "📎 " + esc(f.name) + ' <i style="opacity:.6;font-style:normal">' + fmtSize(f.size) + "</i>";
+      var x = el("b", "", "×");
+      x.style.cssText = "cursor:pointer;margin-left:6px;font-weight:700";
+      x.addEventListener("click", function () { pendingFiles.splice(i, 1); renderAttachBar(); });
+      chip.appendChild(x);
+      bar.appendChild(chip);
+    });
+  }
+
+  function addFiles(files) {
+    var list = [].slice.call(files || []);
+    if (!list.length) return;
+    list = list.slice(0, 3 - pendingFiles.length);
+    list.forEach(function (f) {
+      if (f.size > 20 * 1024 * 1024) { toast("《" + f.name + "》超过 20MB，跳过"); return; }
+      pendingFiles.push(f);
+    });
+    renderAttachBar();
+    toast(pendingFiles.length + " 个附件就绪（发送时自动存入虚拟工作区）");
+  }
+
+  function uploadFile(file) {
+    return file.arrayBuffer().then(function (buf) {
+      return fetch(bridgeBase() + "/vm/file/upload?name=" + encodeURIComponent(file.name), {
+        method: "POST",
+        headers: { "Content-Type": "application/octet-stream" },
+        body: buf,
+      }).then(function (r) { return r.json(); });
+    });
+  }
+
   function bindComposer() {
     var ta = $("#input");
+    // 附件按钮（📎）+ 隐藏文件选择框 + 附件展示条
+    var composer = document.querySelector(".composer");
+    attachInput = document.createElement("input");
+    attachInput.type = "file";
+    attachInput.multiple = true;
+    attachInput.hidden = true;
+    attachInput.addEventListener("change", function () {
+      addFiles(attachInput.files);
+      attachInput.value = "";
+    });
+    var attachBtn = document.createElement("button");
+    attachBtn.type = "button";
+    attachBtn.className = "icon-btn";
+    attachBtn.title = "附加文件（也可直接拖进聊天区）";
+    attachBtn.innerHTML = '<svg viewBox="0 0 24 24" class="ico"><path d="M21 12.5l-8.5 8.5a5.5 5.5 0 0 1-7.8-7.8L13 4.9a3.7 3.7 0 0 1 5.2 5.2l-8.3 8.3a1.8 1.8 0 0 1-2.6-2.6l7.6-7.6"/></svg>';
+    attachBtn.addEventListener("click", function () { attachInput.click(); });
+    composer.insertBefore(attachBtn, ta.nextSibling); // 在输入框后、麦克风前
+    composer.appendChild(attachInput);
+    var bar = document.createElement("div");
+    bar.id = "attach-bar";
+    bar.hidden = true;
+    document.querySelector(".composer-wrap").insertBefore(bar, composer);
+    // 拖拽上传：整个聊天区都接
+    var dropZone = document.querySelector("#panel-chat");
+    dropZone.addEventListener("dragover", function (e) { e.preventDefault(); });
+    dropZone.addEventListener("drop", function (e) {
+      e.preventDefault();
+      if (e.dataTransfer && e.dataTransfer.files.length) addFiles(e.dataTransfer.files);
+    });
     // 草稿持久化：页面重载（如后台更新）不再吞掉正在输入的内容
     try { ta.value = localStorage.getItem("lumen-draft") || ""; if (ta.value) autosize(); } catch (e) {}
     ta.addEventListener("input", function () {

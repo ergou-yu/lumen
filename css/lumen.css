@@ -345,6 +345,14 @@ svg.ico { width: 20px; height: 20px; fill: none; stroke: currentColor; stroke-wi
 }
 @keyframes vb-shimmer { to { transform: translateX(100%); } }
 
+/* 聊天附件条 */
+#attach-bar { display: flex; gap: 8px; flex-wrap: wrap; padding: 0 4px 8px; }
+.attach-chip {
+  display: inline-flex; align-items: center;
+  background: rgba(111,163,194,0.16); border: 1px solid var(--line);
+  border-radius: 999px; padding: 4px 12px; font-size: 12.5px; color: var(--ink);
+}
+
 /* 虚拟浏览器小剧场 · 页面标题行（真实页面的标题） */
 .vb-title {
   padding: 5px 12px 0;

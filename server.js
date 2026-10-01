@@ -33,7 +33,7 @@ const LUMEN_DIR = __dirname;
 // 服务端模型（可选）：自带 Key，绝不读取任何第三方工具的本地配置
 const MODEL_KEY = process.env.LUMEN_MODEL_API_KEY || null;
 const MODEL_BASE = (process.env.LUMEN_MODEL_BASE || "").replace(/\/+$/, "");
-const MODEL_NAME = process.env.LUMEN_MODEL_NAME || "glm-4.7-flash";
+const MODEL_NAME = process.env.LUMEN_MODEL_NAME || "glm-5.3";
 const SKILLS_DIR = path.join(LUMEN_DIR, "skills");
 const QCU_BIN = process.env.QCU_BIN || "qcu";
 const QCU_TIMEOUT_MS = parseInt(process.env.QCU_TIMEOUT_MS || "90000", 10);

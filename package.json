@@ -1,6 +1,6 @@
 {
   "name": "lumen",
-  "version": "1.1.1",
+  "version": "1.1.2",
   "description": "印象派风格的开源私人 AI 代理：容器化桌面虚拟机 + Sentinel 审批 + 凭证安全区 + 多模型接入，零依赖 Node 克隆即用",
   "main": "server.js",
   "scripts": {

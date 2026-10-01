@@ -1983,9 +1983,9 @@ const server = http.createServer(async function (req, res) {
   const MUTATING_BOX_ROUTES = new Set([
     "/vm/desktop/start", "/vm/desktop/stop", "/vm/desktop/build", "/vm/desktop/act",
     "/sentinel/decide", "/vm/vault/set", "/vm/vault/del", "/update/apply", "/vm/file/upload",
-    "/rules", "/notify", "/notify/config",
+    "/rules", "/notify", "/notify/config", "/connectors/save", "/connectors/test", "/connectors/action",
   ]);
-  if (p.indexOf("/vm/desktop/") === 0 || p.indexOf("/vm/vault") === 0 || p.indexOf("/sentinel/") === 0 || p === "/vm/file/upload" || p.indexOf("/rules") === 0 || p.indexOf("/notify") === 0) {
+  if (p.indexOf("/vm/desktop/") === 0 || p.indexOf("/vm/vault") === 0 || p.indexOf("/sentinel/") === 0 || p === "/vm/file/upload" || p.indexOf("/rules") === 0 || p.indexOf("/notify") === 0 || p.indexOf("/connectors") === 0) {
     const origin = req.headers["origin"];
     let sameOrigin = !origin;
     if (origin) {
@@ -2140,6 +2140,327 @@ const server = http.createServer(async function (req, res) {
     console.log("🔐 安全区写入凭证：" + name + "（值不显示）");
     return json(res, 200, { ok: true, vault: vaultPublic() });
   }
+  // —— 应用连接（飞书/Lark · Google · 自动化配方）——
+  // 原则与模型接入一致：用户自带凭证；密钥只存本机 lumen-connectors.json（0600），API 永不回传明文。
+  const CONNECTORS_FILE = path.join(LUMEN_DIR, "lumen-connectors.json");
+  let connectors = {};
+  function connectorsLoad() {
+    try { connectors = JSON.parse(fs.readFileSync(CONNECTORS_FILE, "utf8")); }
+    catch (e) { connectors = {}; }
+  }
+  function connectorsSave() {
+    try {
+      fs.writeFileSync(CONNECTORS_FILE, JSON.stringify(connectors, null, 2), { mode: 0o600 });
+      fs.chmodSync(CONNECTORS_FILE, 0o600);
+    } catch (e) { console.warn("应用连接配置保存失败：", e.message); }
+  }
+  connectorsLoad();
+  function connectorsPublic() {
+    const c = connectors || {};
+    const lark = c.lark || {};
+    const g = c.google || {};
+    return {
+      lark: {
+        configured: !!(lark.mode === "webhook" ? lark.webhook : (lark.appId && lark.appSecret)),
+        mode: lark.mode || "app",
+        region: lark.region || "feishu",
+        appId: lark.appId || "",
+        defaultChatId: lark.defaultChatId || "",
+        hasWebhook: !!lark.webhook,
+      },
+      google: {
+        configured: !!(g.clientId && g.clientSecret),
+        authorized: !!g.refreshToken,
+        email: g.email || "",
+      },
+    };
+  }
+
+  // —— 飞书 / Lark OpenAPI ——
+  const LARK_HOSTS = { feishu: "https://open.feishu.cn", larksuite: "https://open.larksuite.com" };
+  let larkTokenCache = { token: "", exp: 0 };
+  async function larkTenantToken(cfg) {
+    if (larkTokenCache.token && Date.now() < larkTokenCache.exp - 60000) return larkTokenCache.token;
+    const host = LARK_HOSTS[cfg.region] || LARK_HOSTS.feishu;
+    const r = await fetch(host + "/open-apis/auth/v3/tenant_access_token/internal", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ app_id: cfg.appId, app_secret: cfg.appSecret }),
+    }).then(function (x) { return x.json(); });
+    if (r.code !== 0) throw new Error("飞书鉴权失败：" + (r.msg || r.code) + "（检查 App ID/Secret 与应用是否启用）");
+    larkTokenCache = { token: r.tenant_access_token, exp: Date.now() + (r.expire || 1140) * 1000 };
+    return r.tenant_access_token;
+  }
+  async function larkSend(cfg, args) {
+    const text = String(args.text || "");
+    if (!text) throw new Error("消息内容为空");
+    if ((cfg.mode === "webhook" || !cfg.appId) && cfg.webhook) {
+      const r = await fetch(cfg.webhook, {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ msg_type: "text", content: { text: text } }),
+      }).then(function (x) { return x.json(); });
+      if ((r.code !== undefined && r.code !== 0) || (r.StatusCode !== undefined && r.StatusCode !== 0)) {
+        throw new Error("Webhook 发送失败：" + (r.msg || JSON.stringify(r)));
+      }
+      return { channel: "webhook" };
+    }
+    const target = String(args.chatId || cfg.defaultChatId || "").trim();
+    if (!target) throw new Error("未指定接收者：在 设置 → 应用连接 填默认群 chat_id（oc 开头），或在指令里给出 open_id/chat_id");
+    const ridType = target.indexOf("oc") === 0 ? "chat_id" : target.indexOf("ou") === 0 ? "open_id"
+      : target.indexOf("@") > 0 ? "email" : "chat_id";
+    const token = await larkTenantToken(cfg);
+    const host = LARK_HOSTS[cfg.region] || LARK_HOSTS.feishu;
+    const r = await fetch(host + "/open-apis/im/v1/messages?receive_id_type=" + ridType, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Authorization: "Bearer " + token },
+      body: JSON.stringify({ receive_id: target, msg_type: "text", content: JSON.stringify({ text: text }) }),
+    }).then(function (x) { return x.json(); });
+    if (r.code !== 0) throw new Error("飞书发送失败：" + (r.msg || r.code) + "（机器人需在群里/有 im 权限）");
+    return { channel: "app", messageId: r.data && r.data.message_id };
+  }
+  async function larkDoc(cfg, args) {
+    const token = await larkTenantToken(cfg);
+    const host = LARK_HOSTS[cfg.region] || LARK_HOSTS.feishu;
+    const title = String(args.title || "Lumi 笔记 · " + new Date().toISOString().slice(0, 10));
+    const doc = await fetch(host + "/open-apis/docx/v1/documents", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Authorization: "Bearer " + token },
+      body: JSON.stringify({ title: title.slice(0, 100) }),
+    }).then(function (x) { return x.json(); });
+    if (doc.code !== 0) throw new Error("飞书文档创建失败：" + (doc.msg || doc.code) + "（应用需开通云文档权限）");
+    const docId = doc.data && doc.data.document && doc.data.document.document_id;
+    const text = String(args.text || "");
+    let blockErr = "";
+    if (text) {
+      const paras = text.split(/\n+/).filter(Boolean).slice(0, 50);
+      const children = paras.map(function (p) {
+        return { block_type: 2, text: { elements: [{ text_run: { content: p.slice(0, 2000) } }] } };
+      });
+      const r2 = await fetch(host + "/open-apis/docx/v1/documents/" + docId + "/blocks/" + docId + "/children", {
+        method: "POST",
+        headers: { "Content-Type": "application/json", Authorization: "Bearer " + token },
+        body: JSON.stringify({ children: children, index: 0 }),
+      }).then(function (x) { return x.json(); });
+      if (r2.code !== 0) blockErr = "（正文写入失败：" + (r2.msg || r2.code) + "，文档本身已创建）";
+    }
+    const web = cfg.region === "larksuite" ? "https://www.larksuite.com/docx/" : "https://www.feishu.cn/docx/";
+    return { documentId: docId, url: web + docId, note: blockErr };
+  }
+  async function larkEvent(cfg, args) {
+    const token = await larkTenantToken(cfg);
+    const host = LARK_HOSTS[cfg.region] || LARK_HOSTS.feishu;
+    const cl = await fetch(host + "/open-apis/calendar/v4/calendars", {
+      headers: { Authorization: "Bearer " + token },
+    }).then(function (x) { return x.json(); });
+    if (cl.code !== 0) throw new Error("飞书日历读取失败：" + (cl.msg || cl.code) + "（应用需开通日历权限）");
+    const list = (cl.data && cl.data.calendar_list) || [];
+    const cal = list.filter(function (c) { return c.is_primary; })[0] || list[0];
+    if (!cal) throw new Error("没有可用日历");
+    const ts = function (iso) { return String(Math.floor(new Date(iso).getTime() / 1000)); };
+    const ev = await fetch(host + "/open-apis/calendar/v4/calendars/" + cal.calendar_id + "/events", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Authorization: "Bearer " + token },
+      body: JSON.stringify({
+        summary: String(args.summary || "日程").slice(0, 100),
+        description: String(args.description || "").slice(0, 500),
+        start: { timestamp: ts(args.startISO) },
+        end: { timestamp: ts(args.endISO) },
+      }),
+    }).then(function (x) { return x.json(); });
+    if (ev.code !== 0) throw new Error("飞书日程创建失败：" + (ev.msg || ev.code));
+    return { eventId: ev.data && ev.data.event && ev.data.event.event_id };
+  }
+
+  // —— Google OAuth（自带 Client ID，走本机回环回调）——
+  const GOOGLE_SCOPES = [
+    "https://www.googleapis.com/auth/gmail.send",
+    "https://www.googleapis.com/auth/calendar.events",
+    "https://www.googleapis.com/auth/userinfo.email",
+  ].join(" ");
+  function googleRedirectUri() { return "http://localhost:" + PORT + "/connectors/google/callback"; }
+  function googleAuthUrl(cfg) {
+    return "https://accounts.google.com/o/oauth2/v2/auth?" + new URLSearchParams({
+      client_id: cfg.clientId, redirect_uri: googleRedirectUri(),
+      response_type: "code", scope: GOOGLE_SCOPES,
+      access_type: "offline", prompt: "consent",
+    }).toString();
+  }
+  async function googleToken(cfg, params) {
+    const r = await fetch("https://oauth2.googleapis.com/token", {
+      method: "POST", headers: { "Content-Type": "application/x-www-form-urlencoded" },
+      body: new URLSearchParams(Object.assign({ client_id: cfg.clientId, client_secret: cfg.clientSecret }, params)),
+    }).then(function (x) { return x.json(); });
+    if (r.error) throw new Error("Google 授权失败：" + (r.error_description || r.error));
+    return r;
+  }
+  async function googleAccess(cfg) {
+    const g = connectors.google;
+    if (g._accessToken && Date.now() < (g._tokenExp || 0) - 60000) return g._accessToken;
+    if (!g.refreshToken) throw new Error("Google 未授权：到 设置 → 应用连接 点「去 Google 授权」");
+    const r = await googleToken(cfg, { grant_type: "refresh_token", refresh_token: g.refreshToken });
+    g._accessToken = r.access_token;
+    g._tokenExp = Date.now() + (r.expires_in || 3600) * 1000;
+    connectorsSave();
+    return r.access_token;
+  }
+  async function googleCall(url, init) {
+    const cfg = connectors.google;
+    const go = function (token) {
+      return fetch(url, Object.assign({}, init, {
+        headers: Object.assign({}, (init && init.headers) || {}, { Authorization: "Bearer " + token }),
+      }));
+    };
+    let r = await go(await googleAccess(cfg));
+    if (r.status === 401) { // access token 过期：清缓存强刷一次
+      connectors.google._tokenExp = 0;
+      r = await go(await googleAccess(cfg));
+    }
+    return r;
+  }
+  function b64url(str) { return Buffer.from(str, "utf8").toString("base64").replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, ""); }
+  async function googleSend(args) {
+    const to = String(args.to || "").trim();
+    if (!to || to.indexOf("@") < 1) throw new Error("缺收件人邮箱（to）");
+    const subject = String(args.subject || "(Lumi 代发)").slice(0, 200);
+    const mime = "To: " + to + "\r\nContent-Type: text/plain; charset=UTF-8\r\nSubject: " + subject + "\r\n\r\n" + String(args.body || "");
+    const r = await googleCall("https://gmail.googleapis.com/gmail/v1/users/me/messages/send", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ raw: b64url(mime) }),
+    });
+    const d = await r.json().catch(function () { return {}; });
+    if (!r.ok) throw new Error("Gmail 发送失败：" + ((d.error && d.error.message) || r.status));
+    return { to: to, threadId: d.threadId };
+  }
+  async function googleEvent(args) {
+    if (!args.startISO || !args.endISO) throw new Error("缺时间：需要 startISO / endISO（如 2026-10-02T09:00:00+08:00）");
+    const r = await googleCall("https://www.googleapis.com/calendar/v3/calendars/primary/events", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        summary: String(args.summary || "日程").slice(0, 200),
+        description: String(args.description || "").slice(0, 1000),
+        start: { dateTime: args.startISO }, end: { dateTime: args.endISO },
+      }),
+    });
+    const d = await r.json().catch(function () { return {}; });
+    if (!r.ok) throw new Error("Google 日历创建失败：" + ((d.error && d.error.message) || r.status));
+    return { htmlLink: d.htmlLink };
+  }
+
+  // —— 应用连接路由 ——
+  if (p === "/connectors" || p.indexOf("/connectors/") === 0) {
+    if (req.method === "GET" && p === "/connectors") {
+      const pub = connectorsPublic();
+      return json(res, 200, {
+        ok: true, connectors: pub,
+        googleAuthUrl: (pub.google.configured && !pub.google.authorized) ? googleAuthUrl(connectors.google) : "",
+      });
+    }
+    if (req.method === "GET" && p === "/connectors/google/auth") {
+      const cfg = connectors.google || {};
+      if (!cfg.clientId || !cfg.clientSecret) return json(res, 400, { ok: false, error: "请先保存 Google Client ID / Secret 再授权" });
+      res.writeHead(302, { Location: googleAuthUrl(cfg) });
+      return res.end();
+    }
+    if (req.method === "GET" && p === "/connectors/google/callback") {
+      const q = new URL(req.url, "http://localhost").searchParams;
+      const code = q.get("code");
+      const page = function (title, body) {
+        res.writeHead(200, { "Content-Type": "text/html; charset=utf-8" });
+        return res.end('<!doctype html><meta charset="utf-8"><body style="font-family:-apple-system,sans-serif;background:#101418;color:#e8e4da;display:flex;align-items:center;justify-content:center;height:100vh;margin:0"><div style="text-align:center"><div style="font-size:40px">' + title + '</div><p style="color:#9aa3ad">' + body + '</p></div></body>');
+      };
+      if (!code) return page("❌", "授权未完成（未收到 code），可关闭此页回到 Lumen 设置重试");
+      try {
+        const cfg = connectors.google;
+        const tk = await googleToken(cfg, { code: code, grant_type: "authorization_code", redirect_uri: googleRedirectUri() });
+        if (tk.refresh_token) cfg.refreshToken = tk.refresh_token;
+        cfg._accessToken = tk.access_token;
+        cfg._tokenExp = Date.now() + (tk.expires_in || 3600) * 1000;
+        const prof = await fetch("https://www.googleapis.com/oauth2/v2/userinfo", {
+          headers: { Authorization: "Bearer " + tk.access_token },
+        }).then(function (x) { return x.json(); }).catch(function () { return {}; });
+        if (prof.email) cfg.email = prof.email;
+        connectorsSave();
+        console.log("🔗 Google 应用连接已授权：" + (cfg.email || "(邮箱未读取到)"));
+        return page("✅", "Google 已连接" + (cfg.email ? "（" + cfg.email + "）" : "") + "。回到 Lumen 的设置 → 应用连接 即可使用");
+      } catch (e) { return page("❌", "授权失败：" + (e.message || e)); }
+    }
+    let cbody = null;
+    try { cbody = JSON.parse((await readBody(req, 256 * 1024)).toString("utf8")); }
+    catch (e) { return json(res, 400, { ok: false, error: "请求体非法" }); }
+    if (req.method === "POST" && p === "/connectors/save") {
+      const id = String(cbody.id || "");
+      const patch = cbody.patch || {};
+      if (id === "lark") {
+        const cur = connectors.lark = connectors.lark || {};
+        ["mode", "region", "appId", "appSecret", "webhook", "defaultChatId"].forEach(function (k) {
+          if (typeof patch[k] === "string") cur[k] = patch[k].trim();
+        });
+        if (cur.mode !== "webhook") cur.mode = "app";
+        if (cur.region !== "larksuite") cur.region = "feishu";
+        larkTokenCache = { token: "", exp: 0 };
+      } else if (id === "google") {
+        const cur = connectors.google = connectors.google || {};
+        if (typeof patch.clientId === "string") cur.clientId = patch.clientId.trim();
+        if (typeof patch.clientSecret === "string") cur.clientSecret = patch.clientSecret.trim();
+        if (patch.clearAuth) {
+          delete cur.refreshToken; delete cur._accessToken; delete cur.email; cur._tokenExp = 0;
+        }
+      } else return json(res, 400, { ok: false, error: "未知连接 " + id });
+      connectorsSave();
+      console.log("🔗 应用连接配置已保存：" + id + "（密钥不回显）");
+      const pub = connectorsPublic();
+      return json(res, 200, { ok: true, connectors: pub, googleAuthUrl: (pub.google.configured && !pub.google.authorized) ? googleAuthUrl(connectors.google) : "" });
+    }
+    if (req.method === "POST" && p === "/connectors/test") {
+      const id = String(cbody.id || "");
+      try {
+        if (id === "lark") {
+          const cfg = connectors.lark || {};
+          if (!(cfg.mode === "webhook" ? cfg.webhook : (cfg.appId && cfg.appSecret))) throw new Error("先保存完整配置");
+          if (cfg.mode === "webhook") {
+            await larkSend(cfg, { text: "🌐 Lumen 连接测试 · " + new Date().toLocaleString("zh-CN") });
+            return json(res, 200, { ok: true, msg: "✅ 已向群发送测试消息" });
+          }
+          await larkTenantToken(cfg);
+          return json(res, 200, { ok: true, msg: "✅ 飞书鉴权成功（应用模式）" });
+        }
+        if (id === "google") {
+          const cfg = connectors.google || {};
+          if (!cfg.clientId || !cfg.clientSecret) throw new Error("先保存 Client ID / Secret");
+          if (!cfg.refreshToken) throw new Error("已保存但未授权：点「去 Google 授权」完成 OAuth");
+          await googleAccess(cfg);
+          return json(res, 200, { ok: true, msg: "✅ 已授权" + (cfg.email ? " · " + cfg.email : "") });
+        }
+        throw new Error("未知连接 " + id);
+      } catch (e) { return json(res, 200, { ok: false, error: String(e.message || e) }); }
+    }
+    if (req.method === "POST" && p === "/connectors/action") {
+      const id = String(cbody.id || ""), action = String(cbody.action || ""), args = cbody.args || {};
+      try {
+        let out = null;
+        if (id === "lark") {
+          const cfg = connectors.lark;
+          if (!cfg) throw new Error("飞书未配置：设置 → 应用连接");
+          if (action === "send") out = await larkSend(cfg, args);
+          else if (action === "doc") out = await larkDoc(cfg, args);
+          else if (action === "event") out = await larkEvent(cfg, args);
+          else throw new Error("未知动作 " + action);
+          console.log("📤 应用连接 · 飞书 " + action);
+        } else if (id === "google") {
+          if (!connectors.google || !connectors.google.refreshToken) throw new Error("Google 未授权：设置 → 应用连接");
+          if (action === "send") out = await googleSend(args);
+          else if (action === "event") out = await googleEvent(args);
+          else throw new Error("未知动作 " + action);
+          console.log("📤 应用连接 · Google " + action);
+        } else throw new Error("未知连接 " + id);
+        return json(res, 200, { ok: true, result: out });
+      } catch (e) {
+        console.warn("📤 应用连接失败 · " + id + "/" + action + "：", e.message);
+        return json(res, 200, { ok: false, error: String(e.message || e) });
+      }
+    }
+    return json(res, 404, { ok: false, error: "应用连接路由不存在" });
+  }
+
   // —— 动作规则（浏览器设置页维护，实时同步） ——
   if (req.method === "GET" && p === "/rules") {
     return json(res, 200, { ok: true, rules: customRules });

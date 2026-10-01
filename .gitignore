@@ -26,3 +26,4 @@ docs/brochure/page-*.png
 
 # 个人启动器（本机专用，不入库）
 run.sh
+lumen-connectors.json

@@ -2353,6 +2353,168 @@
       "</div>");
     body.appendChild(sec3);
 
+    // —— 应用连接（真实第三方应用：自带凭证，密钥只存本机） ——
+    var secConn = el("div", "set-section");
+    secConn.appendChild(el("h3", "", "应用连接 · 真实第三方应用（自带凭证）"));
+    function connChip(ok, text) {
+      return '<span class="pc-status ' + (ok ? "on" : "off") + '">' + text + "</span>";
+    }
+    function connField(rowLabel, inputType, inputId, placeholder) {
+      var row = el("div", "set-row");
+      row.appendChild(el("label", "", rowLabel));
+      var inp = document.createElement("input");
+      inp.type = inputType;
+      inp.id = inputId;
+      inp.placeholder = placeholder;
+      inp.style.flex = "1";
+      row.appendChild(inp);
+      return row;
+    }
+    function connBtn(label, onClick, solid) {
+      var b = el("button", "chip" + (solid ? " solid" : ""), label);
+      b.type = "button";
+      b.addEventListener("click", onClick);
+      return b;
+    }
+
+    // —— 飞书 / Lark ——
+    var larkCard = el("div", "provider-card");
+    var larkHead = el("div", "pc-head");
+    larkHead.innerHTML = '<span class="pc-name">飞书 / Lark</span><span id="conn-lark-chip">' + connChip(false, "未配置") + "</span>";
+    larkCard.appendChild(larkHead);
+    var larkBody = el("div", "pc-body");
+    larkBody.appendChild(connField("模式", "text", "lark-mode", "app 或 webhook（默认 app）"));
+    larkBody.appendChild(connField("区域", "text", "lark-region", "feishu（国内）或 larksuite（国际），默认 feishu"));
+    larkBody.appendChild(connField("App ID", "text", "lark-appid", "cli_xxxxxxxx（应用模式）"));
+    larkBody.appendChild(connField("App Secret", "password", "lark-appsecret", "应用模式密钥（不回显）"));
+    larkBody.appendChild(connField("群 Webhook", "password", "lark-webhook", "https://open.feishu.cn/open-apis/bot/v2/hook/…（webhook 模式）"));
+    larkBody.appendChild(connField("默认群 chat_id", "text", "lark-chatid", "oc_xxxxxxxx（应用模式发消息的默认群）"));
+    var larkBtnRow = el("div", "set-row");
+    var larkOut = el("div", "pc-test");
+    larkBtnRow.appendChild(connBtn("保存", function () {
+      desktopApi("/connectors/save", "POST", {
+        id: "lark",
+        patch: {
+          mode: document.getElementById("lark-mode").value.trim(),
+          region: document.getElementById("lark-region").value.trim(),
+          appId: document.getElementById("lark-appid").value.trim(),
+          appSecret: document.getElementById("lark-appsecret").value.trim(),
+          webhook: document.getElementById("lark-webhook").value.trim(),
+          defaultChatId: document.getElementById("lark-chatid").value.trim(),
+        },
+      }).then(function (d) {
+        if (d && d.ok) {
+          toast("飞书配置已保存（密钥只存本机）");
+          document.getElementById("lark-appsecret").value = "";
+          document.getElementById("lark-webhook").value = "";
+          refreshConnChips(d);
+        } else toast("保存失败：" + ((d && d.error) || "服务桥离线"));
+      });
+    }, true));
+    larkBtnRow.appendChild(connBtn("测试", function () {
+      larkOut.textContent = "测试中…";
+      desktopApi("/connectors/test", "POST", { id: "lark" }).then(function (d) {
+        larkOut.className = "pc-test " + (d && d.ok ? "ok" : "err");
+        larkOut.textContent = (d && d.ok && d.msg) || (d && d.error) || "服务桥离线";
+      });
+    }));
+    larkBtnRow.appendChild(larkOut);
+    larkBody.appendChild(larkBtnRow);
+    larkBody.insertAdjacentHTML("beforeend",
+      '<div style="font-size:12.5px;color:var(--ink-faint);margin-top:6px;line-height:1.9">' +
+      "两种连法：<b>① 群机器人</b>——飞书群 → 设置 → 群机器人 → 添加「自定义机器人」，把 Webhook 填进来（只能发群消息，最简单）；" +
+      '<b>② 自建应用</b>——<a href="https://open.feishu.cn/app" target="_blank" style="color:var(--accent)">open.feishu.cn/app</a> 创建企业自建应用，开启「机器人」能力并加 im:message:send（发消息）、docx:document（文档）、calendar:calendar（日程）权限，发布后把 App ID/Secret 填进来，再把机器人拉进群。<br>' +
+      "连好后对 Lumi 说「<b>飞书发：今晚 8 点开会</b>」「<b>把这份笔记存到飞书文档</b>」就是真实发送。</div>");
+    larkCard.appendChild(larkBody);
+    secConn.appendChild(larkCard);
+
+    // —— Google（Gmail 发信 / 日历日程） ——
+    var gCard = el("div", "provider-card");
+    var gHead = el("div", "pc-head");
+    gHead.innerHTML = '<span class="pc-name">Google · Gmail / 日历</span><span id="conn-google-chip">' + connChip(false, "未配置") + "</span>";
+    gCard.appendChild(gHead);
+    var gBody = el("div", "pc-body");
+    gBody.appendChild(connField("Client ID", "text", "g-clientid", "xxxx.apps.googleusercontent.com"));
+    gBody.appendChild(connField("Client Secret", "password", "g-clientsecret", "GOCSPX-…（不回显）"));
+    var gBtnRow = el("div", "set-row");
+    var gOut = el("div", "pc-test");
+    gBtnRow.appendChild(connBtn("保存", function () {
+      desktopApi("/connectors/save", "POST", {
+        id: "google",
+        patch: {
+          clientId: document.getElementById("g-clientid").value.trim(),
+          clientSecret: document.getElementById("g-clientsecret").value.trim(),
+        },
+      }).then(function (d) {
+        if (d && d.ok) {
+          toast("Google 配置已保存");
+          document.getElementById("g-clientsecret").value = "";
+          refreshConnChips(d);
+        } else toast("保存失败：" + ((d && d.error) || "服务桥离线"));
+      });
+    }, true));
+    gBtnRow.appendChild(connBtn("去 Google 授权", function () {
+      desktopApi("/connectors").then(function (d) {
+        if (!d || !d.ok) { toast("请先保存 Client ID / Secret，并确认服务桥在线"); return; }
+        if (d.googleAuthUrl) window.open(d.googleAuthUrl, "_blank");
+        else if (d.connectors && d.connectors.google && d.connectors.google.authorized) toast("已授权过啦（" + (d.connectors.google.email || "Gmail") + "）");
+        else toast("请先保存 Client ID / Secret");
+      });
+    }));
+    gBtnRow.appendChild(connBtn("测试", function () {
+      gOut.textContent = "测试中…";
+      desktopApi("/connectors/test", "POST", { id: "google" }).then(function (d) {
+        gOut.className = "pc-test " + (d && d.ok ? "ok" : "err");
+        gOut.textContent = (d && d.ok && d.msg) || (d && d.error) || "服务桥离线";
+      });
+    }));
+    gBtnRow.appendChild(connBtn("解除授权", function () {
+      if (!window.confirm("解除 Google 授权？（不会删除已发送的邮件/日程）")) return;
+      desktopApi("/connectors/save", "POST", { id: "google", patch: { clearAuth: true } })
+        .then(function (d) { if (d && d.ok) { toast("已解除授权"); refreshConnChips(d); } });
+    }));
+    gBtnRow.appendChild(gOut);
+    gBody.appendChild(gBtnRow);
+    gBody.insertAdjacentHTML("beforeend",
+      '<div style="font-size:12.5px;color:var(--ink-faint);margin-top:6px;line-height:1.9">' +
+      '步骤：<a href="https://console.cloud.google.com/apis/credentials" target="_blank" style="color:var(--accent)">Google Cloud Console</a> → 凭据 → 创建 OAuth 客户端 ID（应用类型选「<b>桌面应用</b>」）→ 填 Client ID/Secret → 点「去授权」在弹出的 Google 页面登录并允许。回调走本机 localhost，凭证只存本机文件。<br>' +
+      "连好后说「<b>发邮件给 xx@xx.com 主题：… 内容：…</b>」「<b>谷歌日历加个日程 周五下午 3 点 牙医</b>」就是真实发送/创建。</div>");
+    gCard.appendChild(gBody);
+    secConn.appendChild(gCard);
+
+    // —— Amazon（无消费者下单 API → 桌面虚拟机真实操作） ——
+    var aCard = el("div", "provider-card");
+    var aHead = el("div", "pc-head");
+    aHead.innerHTML = '<span class="pc-name">Amazon · 购物</span><span class="pc-status off">走虚拟机操作</span>';
+    aCard.appendChild(aHead);
+    var aBody = el("div", "pc-body");
+    var aRow = el("div", "set-row");
+    aRow.appendChild(connBtn("派 Lumi 去虚拟机逛 Amazon", function () {
+      closeSettings();
+      var inp = document.getElementById("input");
+      if (inp) {
+        inp.value = "在虚拟机打开 amazon.cn，搜索并对比我要买的东西，下单前先请示我（登录密码从凭证安全区引用）";
+        inp.focus();
+      }
+    }, true));
+    aBody.appendChild(aRow);
+    aBody.insertAdjacentHTML("beforeend",
+      '<div style="font-size:12.5px;color:var(--ink-faint);margin-top:6px;line-height:1.9">' +
+      "亚马逊不向个人开放下单 API，所以不装「假接口」：Lumi 在<b>桌面虚拟机</b>的真实浏览器里替你逛、比价、加购物车——登录凭证放「凭证安全区」，付款前每一步都经 Sentinel 请示。</div>");
+    aCard.appendChild(aBody);
+    secConn.appendChild(aCard);
+
+    function refreshConnChips(d) {
+      var c = d && d.connectors;
+      if (!c) return;
+      var lc = document.getElementById("conn-lark-chip");
+      var gc = document.getElementById("conn-google-chip");
+      if (lc) lc.innerHTML = connChip(c.lark && c.lark.configured, (c.lark && c.lark.configured) ? ("已配置 · " + ((c.lark.mode === "webhook") ? "群机器人" : "应用")) : "未配置");
+      if (gc) gc.innerHTML = connChip(c.google && c.google.authorized, (c.google && c.google.authorized) ? ("已授权" + (c.google.email ? " · " + c.google.email : "")) : (c.google && c.google.configured ? "待授权" : "未配置"));
+    }
+    desktopApi("/connectors").then(function (d) { if (d && d.ok) refreshConnChips(d); });
+    body.appendChild(secConn);
+
     // —— 连接器（真实能力映射 + 读写权限粒度）——
     var sec4 = el("div", "set-section");
     sec4.appendChild(el("h3", "", "连接器 · 权限粒度（可随时断开）"));

@@ -108,6 +108,181 @@
       .catch(function (e) { return { ok: false, error: String(e && e.message || e) }; });
   }
 
+  // —— 应用连接（飞书/Lark · Google 邮件日历）：真实 API 动作，优先于演示流 ——
+  var CONNECTOR_LABELS = {
+    "lark.send": "发送飞书消息", "lark.doc": "创建飞书文档", "lark.event": "创建飞书日程",
+    "google.send": "发送 Gmail 邮件", "google.event": "创建 Google 日历日程",
+  };
+  function connLabel(conn) { return CONNECTOR_LABELS[conn.id + "." + conn.action] || "应用连接动作"; }
+
+  // 纯文本匹配：飞书必须点名；Google 邮件按发送动词；日历需点名谷歌（避免劫持普通「日历」指令）
+  function matchConnector(text) {
+    var t = (text || "").toLowerCase();
+    if (/飞书|lark/.test(t)) {
+      if (/文档|笔记|doc\b/.test(t)) return { id: "lark", action: "doc" };
+      if (/日历|日程|会议|提醒/.test(t)) return { id: "lark", action: "event" };
+      return { id: "lark", action: "send" };
+    }
+    if (/发(送)?邮件|邮件发|gmail|代发邮件/.test(t)) return { id: "google", action: "send" };
+    if (/谷歌|google/.test(t) && /日历|日程/.test(t)) return { id: "google", action: "event" };
+    return null;
+  }
+
+  function connectorsStatus(task) {
+    return fetch(bridgeBase() + "/connectors", { signal: task && task.controller.signal })
+      .then(function (r) { return r.json(); })
+      .catch(function () { return null; });
+  }
+
+  // 参数抽取：先正则（「说：」「内容：」显式格式），抽不中且已接模型则让模型转 JSON
+  function extractConnectorArgs(task, text, conn) {
+    var key = conn.id + "." + conn.action;
+    var m = null;
+    if (key === "lark.send") {
+      m = text.match(/(?:说|内容|发|发送|通知)(?:给)?(?:飞书|群|lark)?(?:消息|通知)?\s*[：:]\s*([\s\S]+)/i)
+        || text.match(/(?:发|发送|通知)(?:一下)?(?:给)?(?:飞书|群|lark)\s*(?:说)?\s*([\s\S]+)/i);
+      if (m) return Promise.resolve({ text: m[1].trim() });
+    } else if (key === "lark.doc") {
+      m = text.match(/[：:]\s*([\s\S]+)/) || text.match(/(?:写|记|存)(?:一份|一个|篇)?(.+)/);
+      if (m) {
+        var body = m[1].trim().replace(/^(到|到飞书|进飞书|在飞书里?|飞书)[的]?(文档|笔记|上)?/, "");
+        var title = text.replace(/[：:][\s\S]*$/, "").slice(0, 40)
+          .replace(/飞书|lark|文档|笔记|帮我|请|创建|生成|一份|一个/g, "").trim();
+        return Promise.resolve({ title: title || ("Lumi 笔记 · " + new Date().toISOString().slice(0, 10)), text: body });
+      }
+    }
+    var cfg = window.LumenAI.current();
+    if (!cfg) return Promise.resolve(null);
+    var schema = "lark.send:{text}｜lark.doc:{title,text}｜lark.event:{summary,startISO,endISO}｜google.send:{to,subject,body}｜google.event:{summary,startISO,endISO}";
+    return window.LumenAI.chatStream({
+      provider: cfg,
+      messages: [{
+        role: "user",
+        content: "把用户指令转成一个 JSON 参数对象（只输出 JSON，别解释）。动作 " + key + " 的可用字段：" + schema +
+          "。时间用带时区 ISO（如 2026-10-02T09:00:00+08:00），缺结束时间按开始+1小时。当前时间 " + new Date().toISOString() + "。\n指令：" + text,
+      }],
+      signal: task ? task.controller.signal : undefined,
+      onDelta: function () {},
+    }).then(function (rep) {
+      var mm = String(rep || "").match(/\{[\s\S]*\}/);
+      if (!mm) return null;
+      try { var o = JSON.parse(mm[0]); return (o && typeof o === "object") ? o : null; } catch (e) { return null; }
+    }).catch(function () { return null; });
+  }
+
+  function connectorReply(conn, args, ok, result, failReason) {
+    var key = conn.id + "." + conn.action, label = connLabel(conn);
+    if (ok) {
+      var det = "";
+      if (key === "lark.send") det = "消息已" + (((result && result.channel) === "webhook") ? "通过群机器人送达飞书群" : "送达飞书（应用身份）") + "。";
+      if (key === "lark.doc") det = "文档已创建：" + ((result && result.url) || "") + ((result && result.note) || "");
+      if (key === "lark.event") det = "飞书日程已创建（事件号 " + ((result && result.eventId) || "-") + "）。";
+      if (key === "google.send") det = "邮件已通过你的 Gmail 发给 " + ((result && result.to) || "收件人") + "。";
+      if (key === "google.event") det = "Google 日历日程已创建：" + ((result && result.htmlLink) || "");
+      return label + "办好了 ✅\n\n" + det + "\n\n（发送前经过了你的批准，动作已写入审计日志）";
+    }
+    if (failReason === "BRIDGE_OFF") return "这次没法" + label + "：本地服务桥不在线。请先启动服务桥（node server.js 或 sh run.sh）再说一次。";
+    if (failReason && failReason.indexOf("NOT_CONFIGURED") === 0) {
+      if (conn.id === "lark") return "飞书还没连接，这次我没有发送任何东西（不想假装发过）。\n\n两种连法（设置 → 应用连接 → 飞书）：\n1. **群机器人 Webhook**——在飞书群里加「自定义机器人」，把 Webhook 地址贴进来即可发群消息，最简单；\n2. **自建应用**——飞书开放平台建应用，填 App ID/Secret，还能建文档、建日程。\n\n连好后再说一次「飞书发：…」，我就真发了。";
+      return "Google 还没授权，这次我没有发送任何东西。\n\n连接方法（设置 → 应用连接 → Google）：在 Google Cloud Console 建一个 OAuth 客户端（应用类型选「桌面应用」），把 Client ID / Secret 填进来点「去授权」一次即可。连好后邮件与日历就是真发真建。\n\n（过渡方案：说「生成邮件草稿」，我给你 .eml 文件，导入邮箱客户端发送）";
+    }
+    if (failReason === "NEED_ARGS") {
+      var fmt = (conn.id === "google" && conn.action === "send")
+        ? "发邮件给 someone@example.com 主题：周报 内容：本周完成……"
+        : "飞书发：要说的内容";
+      return "我不太确定这次「" + label + "」的具体内容，就不瞎猜了。换个明确说法，比如：\n\n> " + fmt;
+    }
+    if (failReason && failReason.indexOf("HANDOFF") === 0) {
+      return "按你设定的规则，「" + label + "」我碰都不碰——这一步转交你本人执行。（设置 → 规则与审批 可调整）";
+    }
+    return label + "失败了，如实报告：\n\n" + String(failReason || "").replace(/^API_FAIL:/, "") +
+      "\n\n没有东西被发出或创建（失败发生在调用阶段）。可到 设置 → 应用连接 点「测试」检查配置。";
+  }
+
+  function runConnectorFlow(task, text, conn, steps, actMsgId, ctx, hooks) {
+    var label = connLabel(conn);
+    var args = null, result = null;
+    function step(i, fn) {
+      steps[i].status = "active";
+      hooks.patchActivity(actMsgId, { activeStep: i });
+      return fn().then(function (r) {
+        if (task.aborted) throw new Error("__ABORT__");
+        steps[i].status = "done";
+        hooks.patchActivity(actMsgId, {});
+        return r;
+      });
+    }
+    var chain = step(0, function () {
+      return connectorsStatus(task).then(function (d) {
+        var c = d && d.connectors && d.connectors[conn.id];
+        if (!c) throw new Error("BRIDGE_OFF");
+        if (!c.configured || (conn.id === "google" && !c.authorized)) throw new Error("NOT_CONFIGURED");
+        return sleep(200, task);
+      });
+    });
+    chain = chain.then(function () {
+      return step(1, function () {
+        return extractConnectorArgs(task, text, conn).then(function (a) { args = a; });
+      });
+    });
+    chain = chain.then(function () {
+      return step(2, function () {
+        if (!args) throw new Error("NEED_ARGS");
+        var rule = matchRule(label + " 对外发送 appsend");
+        if (rule && rule.mode === "auto") {
+          store.audit("规则放行 · " + label, "规则「" + rule.keywords + "」", "auto");
+          hooks.patchActivity(actMsgId, { autoNote: "「" + label + "」按规则「" + rule.keywords + "」直接放行" });
+          return sleep(300, task);
+        }
+        if (rule && rule.mode === "handoff") throw new Error("HANDOFF");
+        var gate = shouldAskApproval("email"); // 对外发送按敏感类审批
+        if (gate.mode === "always" || gate.mode === "auto") {
+          store.audit(label, "按你的授权策略自动通过", gate.mode === "always" ? "approved" : "auto");
+          hooks.patchActivity(actMsgId, { autoNote: "「" + label + "」按你的授权策略自动通过" });
+          return sleep(400, task);
+        }
+        steps[2].status = "blocked";
+        hooks.patchActivity(actMsgId, {});
+        store.audit("请求批准 · " + label, JSON.stringify(args).slice(0, 120), "info");
+        return hooks.requestApproval({
+          messageId: actMsgId, intent: "appsend", risk: "send",
+          title: label, detail: JSON.stringify(args, null, 2).slice(0, 400),
+        }).then(function (decision) {
+          if (decision === "deny") { task.abort(); throw new Error("DENIED"); }
+          if (decision === "always") { store.state.alwaysAllow["send"] = true; store.save(); }
+          store.audit("已批准 · " + label, decision === "always" ? "并记住为「总是允许」" : "仅此一次", "approved");
+          steps[2].status = "done";
+          hooks.patchActivity(actMsgId, {});
+          return sleep(300, task);
+        });
+      });
+    });
+    chain = chain.then(function () {
+      return step(3, function () {
+        return fetch(bridgeBase() + "/connectors/action", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ id: conn.id, action: conn.action, args: args }),
+          signal: task.controller.signal,
+        }).then(function (r) { return r.json(); }).then(function (d) {
+          if (!d || d.ok !== true) throw new Error("API_FAIL:" + ((d && d.error) || "服务桥无响应"));
+          result = d.result || {};
+          store.audit(label, "真实执行成功", "done");
+          return sleep(200, task);
+        });
+      });
+    });
+    return chain.then(function () {
+      ctx.connectorResult = { text: connectorReply(conn, args, true, result, "") };
+      return ctx.connectorResult;
+    }).catch(function (e) {
+      var msg = String((e && e.message) || e);
+      if (msg === "DENIED" || msg === "__ABORT__") throw e; // 交给 runTask 统一收尾
+      ctx.connectorResult = { text: connectorReply(conn, args, false, null, msg) };
+      return ctx.connectorResult;
+    });
+  }
+
   // 需要真实检索的意图
   var RESEARCHY = { travel: true, purchase: true, research: true };
 
@@ -1213,6 +1388,16 @@
       else if (preferVm(text)) env = "vm";
     }
     var steps = buildPlan(text, intent, env);
+    // —— 应用连接拦截：飞书 / Google 邮件日历（真实 API 动作优先于演示流）——
+    var conn = (intent !== "computer" && intent !== "monitor") ? matchConnector(text) : null;
+    if (conn) {
+      steps = [
+        { name: "连接检查 —— " + connLabel(conn), status: "pending" },
+        { name: "整理参数", status: "pending" },
+        { name: "对外发送 · 批准", status: "pending" },
+        { name: connLabel(conn) + " —— 真实调用", status: "pending" },
+      ];
+    }
     var actMsgId = null;
 
     running++;
@@ -1231,10 +1416,13 @@
       chain = env === "desktop" ? runDesktopFlow(task, text, steps, actMsgId, ctx, hooks)
            : env === "vm" ? runVmFlow(task, text, steps, actMsgId, ctx, hooks)
            : runComputerFlow(task, text, steps, actMsgId, ctx, hooks);
+    } else if (conn) {
+      // 应用连接：飞书 / Google 真实 API 动作（自带审批门）
+      chain = runConnectorFlow(task, text, conn, steps, actMsgId, ctx, hooks);
     } else {
       chain = Promise.resolve();
     }
-    if (intent !== "computer") steps.forEach(function (step, idx) {
+    if (intent !== "computer" && !conn) steps.forEach(function (step, idx) {
       chain = chain.then(function () {
         if (task.aborted) return;
         // —— 审批闸门 ——
@@ -1349,7 +1537,22 @@
 
       var cfg = window.LumenAI.current();
       var speak;
-      if (cfg) {
+      if (ctx.connectorResult) {
+        // 应用连接：结果由真实 API 返回，确定性汇报（不让模型自由发挥）
+        var ctext = ctx.connectorResult.text || "";
+        var cpos = 0;
+        function connType() {
+          if (task.aborted || cpos >= ctext.length) return Promise.resolve();
+          var n = Math.min(2 + Math.floor(Math.random() * 3), ctext.length - cpos);
+          hooks.streamDelta(reply.id, ctext.slice(cpos, cpos + n));
+          cpos += n;
+          return sleep(rd(15, 35), task).then(connType);
+        }
+        speak = connType().then(function () {
+          store.updateMessageIn(conv.id, reply.id, { text: ctext });
+          return ctext;
+        });
+      } else if (cfg) {
         // 真实模型：带上最近对话上下文（从任务所属会话读取，而非当前活跃会话）
         var history = conv.messages
           .filter(function (m) { return (m.role === "user" || m.role === "agent") && m.text && m.id !== reply.id; })

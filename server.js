@@ -24,9 +24,11 @@ const https = require("https");
 const fs = require("fs");
 const path = require("path");
 const { spawn, execFile } = require("child_process");
+const os = require("os");
 
 const PORT = parseInt(process.env.PORT || "8787", 10);
-const HOST = "127.0.0.1"; // 只绑定本机回环，防止订阅与电脑被局域网访问
+// 默认只绑本机回环；手机等同网段设备访问请用 LUMEN_HOST=0.0.0.0 启动（详见 README「手机访问」）
+const HOST = process.env.LUMEN_HOST || "127.0.0.1";
 const LUMEN_DIR = __dirname;
 // 服务端模型（可选）：自带 Key，绝不读取任何第三方工具的本地配置
 const MODEL_KEY = process.env.LUMEN_MODEL_API_KEY || null;
@@ -1069,6 +1071,49 @@ function sh(cmd, args, timeoutMs) {
   });
 }
 
+/* ---------- 动作规则（对标 dots 的 Custom Rules：允许/先问/转交本人） ----------
+ * 规则由用户在设置页维护、实时同步到服务桥（lumen-rules.json），Sentinel 审查动作时优先查规则：
+ *   auto    —— 命中即放行（等效 dots 的“无需询问直接做”）
+ *   ask     —— 命中必须用户批准（“行动前先问”）
+ *   handoff —— 命中直接拒绝并转交本人执行（“转交给你”）
+ * 规则只能放宽“要不要问”，永远不能越过硬拦截（SSRF/恶意站点/敏感字段审批）。
+ * ---------- */
+
+const NOTIFY_FILE = path.join(LUMEN_DIR, "lumen-notify.json");
+let notifyCfg = { webhook: "" };
+try { notifyCfg = Object.assign(notifyCfg, JSON.parse(fs.readFileSync(NOTIFY_FILE, "utf8")) || {}); } catch (e) {}
+function fireWebhook(title, text) {
+  return new Promise(function (resolve) {
+    if (!notifyCfg.webhook) return resolve({ sent: false, reason: "未配置 Webhook" });
+    let u;
+    try { u = new URL(notifyCfg.webhook); } catch (e) { return resolve({ sent: false, reason: "Webhook 地址非法" }); }
+    const payload = JSON.stringify({ title: title, text: text, ts: Date.now(), source: "lumen" });
+    const mod = u.protocol === "http:" ? http : https;
+    const req = mod.request(u, { method: "POST", headers: { "Content-Type": "application/json", "Content-Length": Buffer.byteLength(payload) }, timeout: 8000 }, function (res) { res.resume(); resolve({ sent: res.statusCode < 500, status: res.statusCode }); });
+    req.on("timeout", function () { req.destroy(new Error("webhook 超时")); });
+    req.on("error", function (e) { resolve({ sent: false, reason: e.message }); });
+    req.end(payload);
+  });
+}
+
+const RULES_FILE = path.join(LUMEN_DIR, "lumen-rules.json");
+let customRules = [];
+try { customRules = JSON.parse(fs.readFileSync(RULES_FILE, "utf8")) || []; } catch (e) { customRules = []; }
+function rulesSave() {
+  try { fs.writeFileSync(RULES_FILE, JSON.stringify(customRules, null, 2)); } catch (e) {}
+}
+// 规则匹配：关键词按 空格/、/｜/， 拆分，全部子串命中才算匹配（AND 语义，避免误伤）
+function matchRule(text) {
+  const hay = String(text || "");
+  for (const r of customRules) {
+    if (!r || !r.keywords || !r.mode) continue;
+    const kws = String(r.keywords).split(/[\s、|｜，,]+/).map(k => k.trim()).filter(Boolean);
+    if (!kws.length) continue;
+    if (kws.every(k => hay.includes(k))) return r;
+  }
+  return null;
+}
+
 /* ---------- 凭证安全区（模型永远拿不到明文） ---------- */
 
 function vaultLoad() {
@@ -1147,6 +1192,14 @@ function sentinelReview(action, observeCtx) {
     const isLocalBridge = u.hostname === "host.docker.internal" && (u.port === String(PORT) || (u.port === "" && PORT === "80"));
     if (isPrivateHost(u.hostname) && !isLocalBridge) return { verdict: "block", reason: "SSRF 拦截：私网/回环地址禁止访问" };
     for (const re of DENYLIST) if (re.test(u.href)) return { verdict: "block", reason: "命中恶意站点拦截名单" };
+    {
+      const r = matchRule("navigate " + u.hostname + " " + u.href);
+      if (r) {
+        if (r.mode === "handoff") return { verdict: "block", reason: "按你的规则「" + r.keywords + "」：转交本人执行" };
+        if (r.mode === "ask") return { verdict: "ask", reason: "命中规则「" + r.keywords + "」：打开 " + u.hostname + " 需你确认", approval: { title: "规则要求确认", detail: "你的规则「" + r.keywords + "」要求打开此类页面前先问你：\n" + u.href, digest: "rule|" + u.hostname } };
+        return { verdict: "allow", reason: "规则「" + r.keywords + "」放行" };
+      }
+    }
     return { verdict: "allow", reason: "导航到 " + u.hostname };
   }
 
@@ -1157,6 +1210,9 @@ function sentinelReview(action, observeCtx) {
       SENSITIVE_SECRET_VALUE.test(text.replace(/\s/g, ""));
     const digest = digestOf({ op: "fill", n: a.n, sensitive: true });
     if (sensitiveField) {
+      const frule = matchRule("fill " + ((el && (el.placeholder || el.name || el.text)) || "敏感字段"));
+      if (frule && frule.mode === "handoff") return { verdict: "block", reason: "按你的规则「" + frule.keywords + "」：转交本人填写" };
+      if (frule && frule.mode === "auto") return { verdict: "allow", reason: "规则「" + frule.keywords + "」放行" };
       if (hasGrant(digest)) return { verdict: "allow", reason: "能力凭证有效期内" };
       return {
         verdict: "ask",
@@ -1175,18 +1231,25 @@ function sentinelReview(action, observeCtx) {
   if (op === "click") {
     const el = findElementMeta(a.n, observeCtx);
     const label = (el && (el.text || el.placeholder || el.name || el.tag)) || ("元素 #" + a.n);
+    const rule = matchRule("click " + label);
     if (SENSITIVE_ACT.test(label)) {
       const digest = digestOf({ op: "click", n: a.n, sensitive: true });
+      if (rule && rule.mode === "auto") return { verdict: "allow", reason: "规则「" + rule.keywords + "」放行（敏感动作）" };
       if (hasGrant(digest)) return { verdict: "allow", reason: "能力凭证有效期内" };
       return {
         verdict: "ask",
         reason: "点击对外动作按钮：「" + label.slice(0, 30) + "」",
         approval: {
           title: "执行对外动作",
-          detail: "Lumi 要点击「" + label.slice(0, 40) + "」。这可能产生下单、支付、发送或提交等对外后果，需要你批准。（已保存支付方式的商家，每次购买都会请你确认）",
+          detail: "Lumi 要点击「" + label.slice(0, 40) + "」。这可能产生下单、支付、发送或提交等对外后果，需要你批准。（已保存支付方式的商家，每次购买都会请你确认；也可在 设置 → 规则 里为此类动作配置放行/转交规则）",
           digest: digest,
         },
       };
+    }
+    if (rule) {
+      if (rule.mode === "handoff") return { verdict: "block", reason: "按你的规则「" + rule.keywords + "」：转交本人执行" };
+      if (rule.mode === "ask") return { verdict: "ask", reason: "命中规则「" + rule.keywords + "」：点击「" + label.slice(0, 24) + "」需你确认", approval: { title: "规则要求确认", detail: "你的规则「" + rule.keywords + "」要求此类点击先问你：\n点击「" + label.slice(0, 50) + "」", digest: "rule|" + label.slice(0, 30) } };
+      return { verdict: "allow", reason: "规则「" + rule.keywords + "」放行" };
     }
     return { verdict: "allow", reason: "点击「" + String(label).slice(0, 24) + "」" };
   }
@@ -1427,6 +1490,15 @@ async function dtaskModel(prompt, shotPath) {
   });
 }
 
+// 暂停：任务循环在每步之间挂起（不撤销已做动作；Resume 继续 —— 对标 dots 的 Pause/Resume）
+function waitIfPaused(t) {
+  return new Promise(function (resolve) {
+    const timer = setInterval(function () {
+      if (t.status !== "paused" || t.status === "stopped") { clearInterval(timer); resolve(); }
+    }, 800);
+  });
+}
+
 async function runDesktopTask(t) {
   t.status = "running";
   dstep(t, "phase", "唤醒桌面虚拟机");
@@ -1445,6 +1517,8 @@ async function runDesktopTask(t) {
   let deniedStreak = 0;
 
   while (steps < DTASK_MAX_STEPS && t.status !== "stopped") {
+    if (t.status === "paused") await waitIfPaused(t);
+    if (t.status === "stopped") break;
     steps++;
     // 1) 观察
     let obs;
@@ -1550,6 +1624,7 @@ async function runDesktopTask(t) {
     if (review.verdict === "ask") {
       t.pendingApproval = Object.assign({ id: "apr-" + Date.now().toString(36), t: Date.now() }, review.approval);
       t.status = "waiting_approval";
+      fireWebhook("⚠️ 桌面任务等你批准", "目标：" + t.goal.slice(0, 60) + "\n动作：" + review.reason.slice(0, 60));
       dstep(t, "sentinel", "⚠ 请求批准 —— " + review.reason);
       dtasksSave();
       const decision = await waitApproval(t);
@@ -1610,8 +1685,9 @@ async function runDesktopTask(t) {
     }
   }
 
-  if (t.status !== "stopped") t.status = "done";
+  if (t.status !== "stopped" && t.status !== "paused") t.status = "done";
   t.updatedAt = Date.now();
+  fireWebhook("✅ 桌面任务结束：" + t.status, "目标：" + t.goal.slice(0, 60) + "\n" + (t.summary || "共 " + (t.steps || []).length + " 步").slice(0, 120));
 
   // 笔记落进 LumenBox 工作区（任务草稿保存在虚拟机内）
   if ((t.evidence || []).length) {
@@ -1736,6 +1812,7 @@ async function runTaskOnce(t) {
       (t.hits = t.hits || []).unshift(record);
       t.hits = t.hits.slice(0, 20);
       console.log("🔔 监控命中 [" + t.query + "] " + judge.summary);
+      fireWebhook("🔔 监控命中：" + t.query.slice(0, 30), judge.summary); // 主动通知（对标 dots 的主动汇报）
     }
     (t.log = t.log || []).unshift({ t: record.t, hit: record.hit, summary: record.summary });
     t.log = t.log.slice(0, 10);
@@ -1905,12 +1982,16 @@ const server = http.createServer(async function (req, res) {
   const MUTATING_BOX_ROUTES = new Set([
     "/vm/desktop/start", "/vm/desktop/stop", "/vm/desktop/build", "/vm/desktop/act",
     "/sentinel/decide", "/vm/vault/set", "/vm/vault/del", "/update/apply", "/vm/file/upload",
+    "/rules", "/notify", "/notify/config",
   ]);
-  if (p.indexOf("/vm/desktop/") === 0 || p.indexOf("/vm/vault") === 0 || p.indexOf("/sentinel/") === 0 || p === "/vm/file/upload") {
+  if (p.indexOf("/vm/desktop/") === 0 || p.indexOf("/vm/vault") === 0 || p.indexOf("/sentinel/") === 0 || p === "/vm/file/upload" || p.indexOf("/rules") === 0 || p.indexOf("/notify") === 0) {
     const origin = req.headers["origin"];
-    const sameOrigin = !origin || origin === "http://127.0.0.1:" + PORT || origin === "http://localhost:" + PORT;
+    let sameOrigin = !origin;
+    if (origin) {
+      try { sameOrigin = new URL(origin).host === req.headers.host; } catch (e) { sameOrigin = false; }
+    }
     if (!sameOrigin && !(origin === "null" && req.method === "GET" && !MUTATING_BOX_ROUTES.has(p))) {
-      return json(res, 403, { ok: false, error: "桌面虚拟机端点仅限同源调用（请从 http://127.0.0.1:" + PORT + " 打开 Lumen）" });
+      return json(res, 403, { ok: false, error: "端点仅限同源调用（请从应用所在网址打开 Lumen）" });
     }
   }
 
@@ -2058,6 +2139,79 @@ const server = http.createServer(async function (req, res) {
     console.log("🔐 安全区写入凭证：" + name + "（值不显示）");
     return json(res, 200, { ok: true, vault: vaultPublic() });
   }
+  // —— 动作规则（浏览器设置页维护，实时同步） ——
+  if (req.method === "GET" && p === "/rules") {
+    return json(res, 200, { ok: true, rules: customRules });
+  }
+  if (req.method === "POST" && p === "/rules") {
+    let body;
+    try { body = JSON.parse((await readBody(req, 256 * 1024)).toString("utf8")); }
+    catch (e) { return json(res, 400, { ok: false, error: "请求体非法" }); }
+    const list = Array.isArray(body.rules) ? body.rules.slice(0, 50).map(function (r) {
+      return {
+        id: String(r.id || ("rule-" + Date.now().toString(36))).slice(0, 24),
+        keywords: String(r.keywords || "").slice(0, 80),
+        mode: ["auto", "ask", "handoff"].indexOf(r.mode) > -1 ? r.mode : "ask",
+        note: String(r.note || "").slice(0, 80),
+      };
+    }).filter(function (r) { return r.keywords; }) : [];
+    customRules = list;
+    rulesSave();
+    console.log("📐 规则已更新：" + list.length + " 条");
+    return json(res, 200, { ok: true, rules: customRules });
+  }
+
+  // —— 桌面任务暂停/继续 ——
+  const dtaskPause = p.match(/^\/vm\/desktop\/tasks\/([a-z0-9-]+)\/(pause|resume)$/);
+  if (req.method === "POST" && dtaskPause) {
+    const t = dtasks.find(x => x.id === dtaskPause[1]);
+    if (!t) return json(res, 404, { ok: false, error: "任务不存在" });
+    if (dtaskPause[2] === "pause") {
+      if (["running", "queued", "waiting_approval"].indexOf(t.status) === -1) return json(res, 400, { ok: false, error: "任务当前状态不可暂停：" + t.status });
+      t.status = "paused";
+      dstep(t, "info", "⏸ 已暂停（已完成的动作保留；继续点 Resume）");
+    } else {
+      if (t.status !== "paused") return json(res, 400, { ok: false, error: "任务未在暂停中" });
+      t.status = "running";
+      t._resumeAt = Date.now();
+      dstep(t, "info", "▶ 已继续");
+    }
+    dtasksSave();
+    return json(res, 200, dtaskPublic(t));
+  }
+
+  // —— 通知（Webhook）配置与触发 ——
+  if (req.method === "GET" && p === "/notify/config") {
+    return json(res, 200, { ok: true, webhook: notifyCfg.webhook });
+  }
+  if (req.method === "POST" && p === "/notify/config") {
+    let body;
+    try { body = JSON.parse((await readBody(req, 64 * 1024)).toString("utf8")); }
+    catch (e) { return json(res, 400, { ok: false, error: "请求体非法" }); }
+    notifyCfg.webhook = /^https?:\/\//.test(String(body.webhook || "")) ? String(body.webhook).slice(0, 300) : "";
+    try { fs.writeFileSync(NOTIFY_FILE, JSON.stringify(notifyCfg, null, 2)); } catch (e) {}
+    return json(res, 200, { ok: true, webhook: notifyCfg.webhook });
+  }
+  if (req.method === "POST" && p === "/notify") {
+    let body;
+    try { body = JSON.parse((await readBody(req, 64 * 1024)).toString("utf8")); }
+    catch (e) { return json(res, 400, { ok: false, error: "请求体非法" }); }
+    const r = await fireWebhook(String(body.title || "Lumen").slice(0, 80), String(body.text || "").slice(0, 300));
+    return json(res, r.sent ? 200 : 202, r);
+  }
+
+  // —— 手机/局域网访问信息 ——
+  if (req.method === "GET" && p === "/lan-ips") {
+    const ips = [];
+    const ifaces = os.networkInterfaces();
+    for (const name of Object.keys(ifaces)) {
+      for (const it of ifaces[name] || []) {
+        if (it.family === "IPv4" && !it.internal) ips.push(it.address);
+      }
+    }
+    return json(res, 200, { ok: true, host: HOST, open: HOST === "0.0.0.0", urls: ips.map(ip => "http://" + ip + ":" + PORT) });
+  }
+
   // —— 版本与更新 ——
   if (req.method === "GET" && p === "/update/check") {
     const u = await updateCheck();
@@ -2186,7 +2340,7 @@ setTimeout(async function () {
 }, 4000);
 
 server.listen(PORT, HOST, function () {
-  const url = "http://" + HOST + ":" + PORT + "/";
+  const url = "http://" + (HOST === "0.0.0.0" ? "127.0.0.1" : HOST) + ":" + PORT + "/";
   console.log("🌊 Lumen · 本地服务桥 v3 已启动");
   console.log("   应用网址 " + url + "（浏览器打开即用）");
   console.log("   服务端模型 " + serverModelHint());

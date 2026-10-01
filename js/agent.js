@@ -317,6 +317,36 @@
     return best || "chat";
   }
 
+  // —— 动作规则（对标 dots Custom Rules；设置页维护，Sentinel/审批门共用语义） ——
+  function matchRule(text) {
+    var rules = (store.state.settings.rules || []);
+    var hay = String(text || "");
+    for (var i = 0; i < rules.length; i++) {
+      var r = rules[i];
+      if (!r || !r.keywords || !r.mode) continue;
+      var kws = String(r.keywords).split(/[\s、|｜，,]+/).map(function (k) { return k.trim(); }).filter(Boolean);
+      if (!kws.length) continue;
+      var all = kws.every(function (k) { return hay.indexOf(k) !== -1; });
+      if (all) return r;
+    }
+    return null;
+  }
+
+  // 浏览器系统通知（页面开着时；权限在设置页授予）
+  function notifyUser(title, body) {
+    try {
+      if (store.state.settings.notifyBrowser && window.Notification && Notification.permission === "granted") {
+        new Notification(title, { body: String(body || "").slice(0, 120), tag: "lumen" });
+      }
+    } catch (e) {}
+    // Webhook 中继（桌面任务/监控由服务桥直接发；聊天任务经这里补发）
+    fetch(bridgeBase() + "/notify", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ title: title, text: body }),
+    }).catch(function () {});
+  }
+
   // 需要审批闸门的「关键动作」意图（花钱/对外发送类必须经你同意）
   var CRITICAL = { travel: true, purchase: true, email: true };
 
@@ -1209,6 +1239,23 @@
         if (task.aborted) return;
         // —— 审批闸门 ——
         if (step.approval) {
+          // 先查动作规则（对标 dots：允许/先问/转交本人）
+          var rule = matchRule(step.approval.title + " " + step.approval.type + " " + intent);
+          if (rule && rule.mode === "auto") {
+            store.audit("规则放行 · " + step.approval.title, "规则「" + rule.keywords + "」：无需询问", "auto");
+            step.status = "done";
+            hooks.patchActivity(actMsgId, { autoNote: "「" + step.approval.title + "」按规则「" + rule.keywords + "」直接放行" });
+            return sleep(400, task);
+          }
+          if (rule && rule.mode === "handoff") {
+            store.audit("规则转交本人 · " + step.approval.title, "规则「" + rule.keywords + "」", "denied");
+            step.status = "done";
+            hooks.patchActivity(actMsgId, { autoNote: "「" + step.approval.title + "」按规则「" + rule.keywords + "」转交你本人执行" });
+            var ho = store.addMessageTo(conv.id, { role: "agent", text: "按你设定的规则，「" + step.approval.title + "」我碰都不碰——这一步转交你本人执行。\n\n（到 设置 → 规则与审批 可调整这条规则）" });
+            hooks.streamStart(ho);
+            hooks.streamEnd(ho.id);
+            return sleep(300, task);
+          }
           var gate = shouldAskApproval(intent);
           if (gate.mode === "always" || gate.mode === "auto") {
             store.audit(step.approval.title, "自主策略：" + (gate.mode === "always" ? "你曾选择「总是允许」" : "全自动模式"), gate.mode === "always" ? "approved" : "auto");
@@ -1501,6 +1548,7 @@
 
     function finish(endState) {
       store.updateMessageIn(conv.id, actMsgId, { state: endState });
+      if (endState === "done") notifyUser("✅ Lumi 任务完成", (text || "").slice(0, 60));
       running = Math.max(0, running - 1);
       hooks.onRunningChange(running);
       activeTasks = activeTasks.filter(function (t) { return t !== task; });

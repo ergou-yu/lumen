@@ -25,6 +25,8 @@
         tone: "monet",          // 说话方式：monet 温柔印象派 | pro 简洁高效 | warm 热心絮叨
         avatarId: "avatar-1",   // 头像：avatar-1/2/3
         speakReplies: false,    // 朗读回复（语音模式输出侧）
+        rules: [],              // 动作规则 {id, keywords, mode: auto|ask|handoff, note}
+        notifyBrowser: false,   // 任务完成浏览器系统通知
       },
       conversations: [],
       activeConvId: "",

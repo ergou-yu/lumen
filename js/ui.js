@@ -918,6 +918,10 @@
       .catch(function () { toast("更新请求失败（服务桥离线？）"); });
   }
 
+  function syncRulesToBridge() {
+    desktopApi("/rules", "POST", { rules: store.state.settings.rules || [] }).catch(function () {});
+  }
+
   function probeDesktop() {
     desktopApi("/vm/desktop/status").then(function (st) {
       if (st && st.ok !== false) {
@@ -1206,7 +1210,7 @@
         box2.appendChild(el("div", "vm-card-head", "📋 桌面任务 · " + list.length + "（服务端执行，关页不中断）"));
         list.slice(0, 5).forEach(function (t) {
           var row = el("div", "vm-task");
-          var stChip = { running: "● 执行中", waiting_approval: "⚠ 待批准", done: "✓ 完成", failed: "✗ 失败", stopped: "⏹ 已停止", queued: "…排队" }[t.status] || t.status;
+          var stChip = { running: "● 执行中", waiting_approval: "⚠ 待批准", done: "✓ 完成", failed: "✗ 失败", stopped: "⏹ 已停止", queued: "…排队", paused: "⏸ 已暂停" }[t.status] || t.status;
           var head2 = el("div", "vm-task-head");
           head2.innerHTML = "<span class=\"st " + (t.status === "done" ? "ok" : t.status === "failed" ? "bad" : "") + "\">" + stChip + "</span>" +
             "<span class=\"goal\">" + esc(t.goal.slice(0, 46)) + "</span>" +
@@ -1231,7 +1235,7 @@
             act.appendChild(ok); act.appendChild(no);
             ap.appendChild(act);
             row.appendChild(ap);
-          } else if (t.status === "running" || t.status === "waiting_approval" || t.status === "queued") {
+          } else if (t.status === "running" || t.status === "waiting_approval" || t.status === "queued" || t.status === "paused") {
             var stopT = el("button", "chip", "停止任务");
             stopT.type = "button";
             stopT.style.marginTop = "6px";
@@ -1239,6 +1243,18 @@
               desktopApi("/vm/desktop/tasks/" + t.id + "/stop", "POST", {}).then(function () { refreshVmDesktop(); });
             });
             row.appendChild(stopT);
+            var pauseT = el("button", "chip", t.status === "paused" ? "▶ 继续" : "⏸ 暂停");
+            pauseT.type = "button";
+            pauseT.style.margin = "6px 0 0 6px";
+            pauseT.addEventListener("click", function () {
+              var act = t.status === "paused" ? "resume" : "pause";
+              desktopApi("/vm/desktop/tasks/" + t.id + "/" + act, "POST", {}).then(function (r) {
+                if (r && r.ok) toast(act === "pause" ? "已暂停（完成的动作保留，点继续接着跑）" : "已继续");
+                else toast("操作失败：" + (r && r.error || ""));
+                refreshVmDesktop();
+              });
+            });
+            row.appendChild(pauseT);
           }
           if (t.shot) {
             var img2 = document.createElement("img");
@@ -2380,6 +2396,116 @@
       "邮件 / 日历：真实文件化——草稿生成 <b>.eml</b>、日程生成 <b>.ics</b>（文件页可下载，导入系统客户端即用）。<br>" +
       "Instagram / WhatsApp：经 <b>QCU 电脑操作</b>接管浏览器会话，逐步执行并请示。开关仅影响 Lumi 的作答倾向。</div>");
     body.appendChild(sec4);
+
+    // —— 规则与审批（对标 dots Custom Rules：允许 / 先问 / 转交本人） ——
+    var secRules = el("div", "set-section");
+    secRules.appendChild(el("h3", "", "规则与审批 · 按动作定制（允许 / 先问 / 转交本人）"));
+    var rulesBox = el("div");
+    rulesBox.style.cssText = "display:flex;flex-direction:column;gap:8px";
+    secRules.appendChild(rulesBox);
+    var kIn = document.createElement("input");
+    kIn.type = "text"; kIn.placeholder = "动作关键词（空格=同时命中，如：客户 发送）"; kIn.style.width = "200px";
+    var mSel = document.createElement("select");
+    [["auto", "无需询问直接做"], ["ask", "行动前先问我"], ["handoff", "转交本人（我碰都不碰）"]].forEach(function (m) {
+      var op = document.createElement("option"); op.value = m[0]; op.textContent = m[1]; mSel.appendChild(op);
+    });
+    var addRule = el("button", "chip", "添加规则");
+    addRule.type = "button";
+    addRule.addEventListener("click", function () {
+      var kws = kIn.value.trim();
+      if (!kws) { toast("填关键词"); return; }
+      (s.rules = s.rules || []).push({ id: "rule-" + Date.now().toString(36), keywords: kws, mode: mSel.value, note: "" });
+      store.save(); syncRulesToBridge(); kIn.value = "";
+      store.audit("新增动作规则", kws + " → " + mSel.options[mSel.selectedIndex].text, "done");
+      renderSettings();
+    });
+    var rRow = el("div", "set-row");
+    rRow.appendChild(kIn); rRow.appendChild(mSel); rRow.appendChild(addRule);
+    secRules.appendChild(rRow);
+    (function renderRules() {
+      rulesBox.innerHTML = "";
+      var list = s.rules || [];
+      if (!list.length) {
+        rulesBox.innerHTML = '<div class="vm-empty" style="padding:2px">（暂无规则）示例：「支付」→ 先问我；「删除 文件」→ 转交本人。规则会同步到服务桥，Sentinel 审查动作与聊天审批时优先查规则；硬拦截（恶意站点/SSRF）永不放宽。</div>';
+        return;
+      }
+      var MODE_NAME = { auto: "✅ 无需询问", ask: "⚠️ 先问我", handoff: "✋ 转交本人" };
+      list.forEach(function (r, i) {
+        var row = el("div", "vm-file-row");
+        row.innerHTML = "<span class='nm'>📋 " + esc(r.keywords) + "</span><span class='meta'>" + (MODE_NAME[r.mode] || r.mode) + "</span>";
+        var del = el("button", "chip", "删除");
+        del.type = "button";
+        del.addEventListener("click", function () {
+          s.rules.splice(i, 1);
+          store.save(); syncRulesToBridge();
+          renderSettings();
+        });
+        row.appendChild(del);
+        rulesBox.appendChild(row);
+      });
+    })();
+    body.appendChild(secRules);
+
+    // —— 通知（浏览器通知 + Webhook，对标 dots 主动汇报） ——
+    var secNotify = el("div", "set-section");
+    secNotify.appendChild(el("h3", "", "通知 · 任务完成 / 监控命中 / 等待批准"));
+    var nbRow = el("div", "set-row");
+    nbRow.appendChild(el("label", "", "浏览器通知"));
+    var nbBtn = el("button", "radio-pill" + (s.notifyBrowser ? " sel" : ""), s.notifyBrowser ? "● 开启（任务完成弹系统通知）" : "○ 开启（任务完成弹系统通知）");
+    nbBtn.type = "button";
+    nbBtn.addEventListener("click", function () {
+      if (!s.notifyBrowser) {
+        if (!window.Notification) { toast("此浏览器不支持系统通知"); return; }
+        Notification.requestPermission().then(function (p) {
+          if (p !== "granted") { toast("通知权限未授予"); return; }
+          s.notifyBrowser = true; store.save(); renderSettings();
+        });
+      } else { s.notifyBrowser = false; store.save(); renderSettings(); }
+    });
+    nbRow.appendChild(nbBtn);
+    secNotify.appendChild(nbRow);
+    var whRow = el("div", "set-row");
+    var whIn = document.createElement("input");
+    whIn.type = "text"; whIn.placeholder = "Webhook URL（如企业微信/钉钉/飞书机器人）"; whIn.style.width = "260px";
+    desktopApi("/notify/config").then(function (c) { if (c && c.webhook) whIn.value = c.webhook; }).catch(function () {});
+    var whSave = el("button", "chip", "保存");
+    whSave.type = "button";
+    whSave.addEventListener("click", function () {
+      desktopApi("/notify/config", "POST", { webhook: whIn.value.trim() }).then(function (r) {
+        if (r && r.ok) { toast(r.webhook ? "Webhook 已保存" : "Webhook 已清空"); store.audit("通知 Webhook", r.webhook ? "已配置" : "已清空", "info"); }
+        else toast("保存失败");
+      });
+    });
+    var whTest = el("button", "chip", "发条测试");
+    whTest.type = "button";
+    whTest.addEventListener("click", function () {
+      desktopApi("/notify", "POST", { title: "Lumen 测试通知", text: "收到这条说明 Webhook 通了 ✅" }).then(function (r) {
+        toast(r && r.sent ? "已发送 ✓" : "未发出：" + ((r && r.reason) || "未知"));
+      });
+    });
+    whRow.appendChild(whIn); whRow.appendChild(whSave); whRow.appendChild(whTest);
+    secNotify.appendChild(whRow);
+    secNotify.insertAdjacentHTML("beforeend",
+      '<div style="font-size:12.5px;color:var(--ink-faint);margin-top:6px;line-height:1.8">触发点：监控命中、桌面任务完成/等待批准（服务桥直接发，浏览器关着也发）；聊天任务完成（浏览器通知 + Webhook 中继）。</div>');
+    body.appendChild(secNotify);
+
+    // —— 手机访问 ——
+    var secMobile = el("div", "set-section");
+    secMobile.appendChild(el("h3", "", "手机访问 · 同一 WiFi 下用手机遥控"));
+    var mobBox = el("div");
+    mobBox.style.cssText = "font-size:13px;color:var(--ink-soft);line-height:1.9";
+    secMobile.appendChild(mobBox);
+    desktopApi("/lan-ips").then(function (d) {
+      if (!d || !d.ok) { mobBox.textContent = "（服务桥离线）"; return; }
+      if (!d.open) {
+        mobBox.innerHTML = "当前只监听本机（127.0.0.1）。想让手机访问：停掉服务桥，改用<br><code>LUMEN_HOST=0.0.0.0 node server.js</code>（或 <code>sh run.sh</code> 前加 <code>LUMEN_HOST=0.0.0.0</code>）启动，然后手机连同一 WiFi 扫下面地址。";
+        return;
+      }
+      mobBox.innerHTML = "✅ 已开放局域网。手机连同一 WiFi，浏览器打开：<br>" +
+        (d.urls || []).map(function (u) { return '<div style="font-family:ui-monospace;font-size:15px;margin:4px 0">' + u + "</div>"; }).join("") +
+        '<div style="font-size:12px;color:#9a6b1a;margin-top:6px">⚠ 局域网内任何设备都可访问本服务桥（含凭证安全区接口），仅在你信任的家庭/办公 WiFi 下开放。</div>';
+    }).catch(function () { mobBox.textContent = "（服务桥离线）"; });
+    body.appendChild(secMobile);
 
     // —— 虚拟计算机（LumenBox）——
     var secVm = el("div", "set-section");

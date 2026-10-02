@@ -120,9 +120,9 @@ LUMEN_HOST=0.0.0.0 LUMEN_ACCESS_TOKEN=你生成的高强度口令 node server.js
 npm test
 ```
 
-17 项自动检查覆盖后台持久化、未知外部结果不重发、权限、计划/时区/DST、子任务、模型格式、渠道签名和 IMAP 分包。平台与模型测试使用本地模拟，不代表真实账号端到端成功。附带 Node 18/22 的 [Actions 工作流示例](docs/ci-test-workflow.yml)。当前 GitHub 登录未授予 workflow 权限，示例尚未安装到 Actions，远端 CI 未运行。
+20 项自动检查覆盖后台持久化、未知外部结果不重发、权限、计划/时区/DST、子任务、模型格式、渠道签名、IMAP 分包和版本更新。平台与模型测试使用本地模拟，不代表真实账号端到端成功。附带 Node 18/22 的 [Actions 工作流示例](docs/ci-test-workflow.yml)。当前 GitHub 登录未授予 workflow 权限，示例尚未安装到 Actions，远端 CI 未运行。
 
-设置 → 更新可检查版本；应用内更新使用 `git pull --ff-only`，本地未提交修改会拒绝覆盖。手动更新后重启服务桥并刷新页面。
+设置 → 更新分别显示本地代码版本与当前服务版本。拉取代码不会替换正在运行的 Node 进程；显示“待重启”时，请在原终端停止服务并用原启动命令重新启动，再刷新网页。应用内更新使用 `git pull --ff-only`，本地未提交修改会拒绝覆盖。离线或远端检查失败时显示无法确认，不报告“已是最新”。
 
 主要结构：`lib/` 为后台运行器/模型/渠道/网络/IMAP，`js/continuity.js` 为持续工作界面，`server.js` 为服务桥，`vm-box/` 为桌面镜像，`skills/` 为内置技能，`tests/` 为自动验证，`docs/` 为调查与部署说明。
 

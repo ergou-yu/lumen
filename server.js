@@ -35,6 +35,7 @@ const { safeGet, resolvePublic } = require("./lib/network");
 const { createModel } = require("./lib/model");
 const { createRuntime } = require("./lib/runtime");
 const { createChannels } = require("./lib/channels");
+const { createUpdater } = require("./lib/updater");
 
 const PORT = parseInt(process.env.PORT || "8787", 10);
 // 默认只绑本机回环；手机等同网段设备访问请用 LUMEN_HOST=0.0.0.0 启动（详见 README「手机访问」）
@@ -973,92 +974,19 @@ function safeShotPath(name) {
  *  · POST /update/apply  git pull --ff-only（脏工作区拒绝；执行后需重启服务桥）
  * ============ */
 
-const PKG = require("./package.json");
 const LUMEN_REPO = process.env.LUMEN_REPO || "ergou-yu/lumen";
-
-async function ghJson(path) {
-  try {
-    const r = await httpGet("https://api.github.com" + path, 10000, 512 * 1024);
-    return { ok: r.status === 200, status: r.status, data: JSON.parse(r.body) };
-  } catch (e) { return { ok: false, error: e.message }; }
-}
-
-let lastUpdateInfo = null; // 供诊断页展示最近一次检查结果
-
-async function updateCheck() {
-  const res = {
-    repo: LUMEN_REPO,
-    local: { version: PKG.version, sha: null },
-    mode: "git", updateAvailable: false, behind: 0, commits: [], note: "", dirty: false,
-  };
-  const head = await sh("git", ["rev-parse", "HEAD"], 8000);
-  if (!head.ok) {
-    // ZIP 下载等非 git 环境：用版本号比较（raw package.json）
-    res.mode = "download";
-    res.note = "当前目录不是 git 克隆（可能来自 ZIP 下载）";
+const updater = createUpdater({
+  dir: LUMEN_DIR, repo: LUMEN_REPO,
+  getJson: async url => {
     try {
-      const raw = await httpGet("https://raw.githubusercontent.com/" + LUMEN_REPO + "/main/package.json", 10000, 64 * 1024);
-      const remote = JSON.parse(raw.body);
-      res.remoteVersion = remote.version || "?";
-      res.updateAvailable = String(remote.version || "") !== PKG.version;
-    } catch (e) { res.note += "；远端版本获取失败（离线？）"; }
-    return res;
-  }
-  res.local.sha = head.out.trim().slice(0, 12);
-  const st = await sh("git", ["status", "--porcelain"], 8000);
-  res.dirty = st.ok && st.out.trim().length > 0; // 有未提交改动：一键更新会拒绝
-
-  const fetch = await sh("git", ["fetch", "--quiet", "origin", "main"], 30000);
-  if (fetch.ok) {
-    const cnt = await sh("git", ["rev-list", "--count", "HEAD..FETCH_HEAD"], 8000);
-    res.behind = parseInt(cnt.out.trim(), 10) || 0;
-    if (res.behind > 0) {
-      res.updateAvailable = true;
-      const log = await sh("git", ["log", "--oneline", "--no-decorate", "-n", "30", "HEAD..FETCH_HEAD"], 8000);
-      res.commits = log.out.split("\n").map(l => l.trim()).filter(Boolean)
-        .slice(0, 30).map(l => l.replace(/^[0-9a-f]{7,} /, ""));
-    }
-    return res;
-  }
-  // fetch 失败（网络/权限）：退回 GitHub API 比较
-  res.mode = "git-api";
-  res.note = "git fetch 失败，改用 GitHub API 比较（" + String(fetch.err || "").slice(0, 60) + "）";
-  const api = await ghJson("/repos/" + LUMEN_REPO + "/commits?per_page=10");
-  if (api.ok && Array.isArray(api.data) && api.data.length) {
-    res.remoteSha = api.data[0].sha.slice(0, 12);
-    if (res.remoteSha !== res.local.sha) {
-      res.updateAvailable = true;
-      res.commits = api.data.map(c => String((c.commit && c.commit.message) || "").split("\n")[0].slice(0, 80)).filter(Boolean);
-    }
-  } else {
-    res.note += "；GitHub API 不可达";
-  }
-  return res;
-}
-
-async function updateApply() {
-  const head = await sh("git", ["rev-parse", "HEAD"], 8000);
-  if (!head.ok) {
-    return { ok: false, error: "当前目录不是 git 克隆。请到 " + LUMEN_REPO + " 重新下载新版，或先 git clone 后再使用一键更新。" };
-  }
-  const st = await sh("git", ["status", "--porcelain"], 8000);
-  if (st.ok && st.out.trim().length) {
-    return { ok: false, error: "本地有未提交的改动，为避免覆盖已拒绝更新。请先 git stash / 提交，或手动处理后再试。", dirty: st.out.trim().split("\n").slice(0, 5) };
-  }
-  const pull = await sh("git", ["pull", "--ff-only", "--quiet", "origin", "main"], 120000);
-  if (!pull.ok) {
-    return { ok: false, error: "git pull 失败（" + String(pull.err || pull.out || "").slice(0, 200) + "）。请手动执行 git pull 排查。" };
-  }
-  const after = await sh("git", ["rev-parse", "--short", "HEAD"], 8000);
-  let newVer = PKG.version;
-  try { newVer = JSON.parse(fs.readFileSync(path.join(LUMEN_DIR, "package.json"), "utf8")).version || PKG.version; } catch (e) {}
-  return {
-    ok: true,
-    nowAt: after.out.trim(),
-    version: newVer,
-    note: "更新完成：请重启服务桥（Ctrl+C 停止后重新 node server.js）让新代码生效；浏览器随后刷新页面。",
-  };
-}
+      const r = await httpGet(url, 10000, 512 * 1024);
+      return { ok: r.status === 200, data: JSON.parse(r.body) };
+    } catch (_) { return { ok: false }; }
+  },
+});
+let lastUpdateInfo = null;
+const updateCheck = () => updater.check();
+const updateApply = () => updater.apply();
 
 const SENTINEL_GRANT_MS = 10 * 60 * 1000; // 能力凭证有效期（对标：绑定用途与期限）
 const DTASK_MAX_STEPS = 14;
@@ -3419,6 +3347,7 @@ const server = http.createServer(async function (req, res) {
   if (req.method === "GET" && p === "/update/check") {
     const u = await updateCheck();
     lastUpdateInfo = u;
+    res.setHeader("Cache-Control", "no-store");
     return json(res, 200, Object.assign({ ok: true }, u));
   }
   if (req.method === "POST" && p === "/update/apply") {
@@ -3536,6 +3465,7 @@ setTimeout(async function () {
   try {
     const u = await updateCheck();
     lastUpdateInfo = u;
+    if (u.restartRequired) console.log("   ↻ 代码已变更，请重启服务桥加载 v" + u.local.version);
     if (u.updateAvailable) {
       console.log("   ✨ 有新版本：落后 " + (u.behind || u.commits.length) + " 个提交（设置 → 更新 可查看并一键更新）");
     }

@@ -1,0 +1,9 @@
+Use case: stylized-concept.
+Asset type: actual Linux desktop wallpaper, wide landscape 16:10, not a screenshot or UI mockup.
+Create a polished, calm, cute wallpaper for the personal assistant Lumi, inspired by an airy floating-dock desktop.
+Input image 1 is the character identity and painterly style reference. Preserve Lumi's recognizable face, short silver-blue/lavender bob hair, warm blush, gentle smile, and teal-gold eyes. One character only.
+Composition: a quiet warm Morandi oat-yellow / ivory background occupies most of the canvas. Keep the left 60% very open and low-detail so desktop windows can sit there. Place a smaller waist-up or shoulders-up portrait of Lumi on the right third, softly integrated into a rounded, organically curved pale pink vignette. Portrait should occupy about 30% of the total canvas width, with generous space around it and away from the edges. Maintain the delicate impressionist painted character style of the reference.
+Palette: muted oat yellow #eee5cc and buttery ivory as the main colors, dusty blush pink #d5a4b2 and soft lavender as accents; subtle muted blue from her hair. Soft flowing abstract color shapes and gentle paper texture, restrained detail.
+Decorations: a few tiny hand-painted four-point sparkles, small pink five-petal flowers and a delicate little pink heart near the portrait, arranged with lots of breathing room. Cute but calm and tasteful. A small sparse cluster of pink dots at the far upper left can echo the desktop inspiration.
+Reserve the bottom 12% as quiet warm cream space for the real system dock. No dock, app icons, windows, buttons, interface controls, borders around the canvas, text, letters, logo, watermark or additional people in the image.
+High-quality finished desktop artwork. Landscape 16:10 framing, soft low-contrast light, not saturated bright pink.

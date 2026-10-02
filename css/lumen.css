@@ -434,6 +434,15 @@ svg.ico { width: 20px; height: 20px; fill: none; stroke: currentColor; stroke-wi
 .vm-note { font-size: 12px; color: var(--ink-faint); line-height: 1.8; }
 .vm-empty { font-size: 13px; color: var(--ink-faint); padding: 6px 2px; }
 .vm-toolbar { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 10px; }
+.vm-appearance { margin-top: 14px; border: 1px solid var(--line-soft); border-radius: 12px; background: rgba(238,229,204,.24); padding: 12px 14px; }
+.vm-appearance summary { cursor: pointer; font-size: 13px; color: var(--ink-soft); }
+.vm-appearance-fields { display: flex; gap: 18px; margin-top: 14px; align-items: flex-start; }
+.vm-wallpaper-preview { width: 160px; aspect-ratio: 8 / 5; flex: none; border: 3px solid #c2ad78; border-radius: 12px; }
+.vm-appearance-choices { flex: 1; min-width: 0; }
+.vm-appearance label { display: flex; gap: 12px; align-items: center; font-size: 12px; margin-bottom: 10px; flex-wrap: wrap; }
+.vm-appearance select { max-width: 100%; color: var(--ink); border: 1px solid var(--line); border-radius: 8px; background: var(--paper); padding: 7px; }
+.vm-appearance input[type=color] { width: 48px; height: 30px; cursor: pointer; border: 1px solid var(--line); border-radius: 6px; padding: 2px; background: var(--paper); }
+@media (max-width: 600px) { .vm-appearance-fields { flex-direction: column; } .vm-wallpaper-preview { width: 100%; max-width: 240px; } }
 
 /* —— 桌面虚拟机（LumenBox Desktop）—— */
 .vm-desk { border-color: rgba(111,163,194,0.35); }

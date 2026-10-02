@@ -36,6 +36,7 @@ const { createModel } = require("./lib/model");
 const { createRuntime } = require("./lib/runtime");
 const { createChannels } = require("./lib/channels");
 const { createUpdater } = require("./lib/updater");
+const { REVISION_LABEL, desktopRevision, inspectDesktop, belongsToWorkspace, ensureDesktop } = require("./lib/desktop-image");
 
 const PORT = parseInt(process.env.PORT || "8787", 10);
 // 默认只绑本机回环；手机等同网段设备访问请用 LUMEN_HOST=0.0.0.0 启动（详见 README「手机访问」）
@@ -953,6 +954,7 @@ function vmPublicState() {
 const BOX_IMAGE = "lumen-box";
 const BOX_NAME = "lumen-box";
 const BOX_DIR = path.join(LUMEN_DIR, "vm-box");
+const BOX_REVISION = desktopRevision(BOX_DIR);
 const VAULT_FILE = path.join(DATA_DIR, "lumen-vault.json");
 const DTASKS_FILE = path.join(DATA_DIR, "lumen-desktop-tasks.json");
 const SHOT_DIR = path.join(VM_HOME, ".shots");
@@ -1210,7 +1212,8 @@ function findElementMeta(n, ctx) {
 
 /* ---------- 容器生命周期 ---------- */
 
-const box = { state: "unknown", ports: null, error: "" }; // state: unknown|building|starting|running|stopped|nodocker
+const box = { state: "unknown", ports: null, revision: null, error: "" }; // state: unknown|building|starting|running|stopped|nodocker
+let boxBuildPromise = null, boxStartPromise = null;
 
 async function dockerAvailable() {
   const r = await sh("docker", ["info", "--format", "{{.ServerVersion}}"], 10000);
@@ -1222,29 +1225,32 @@ async function boxImageExists() {
   return r.ok && r.out.trim().length > 0;
 }
 
-async function boxBuild(onLog) {
+function boxBuild(onLog) {
+  if (!boxBuildPromise) boxBuildPromise = buildDesktopImage(onLog).finally(() => { boxBuildPromise = null; });
+  return boxBuildPromise;
+}
+async function buildDesktopImage(onLog) {
   box.state = "building";
   const r = await new Promise(function (resolve) {
-    const child = spawn("docker", ["build", "-t", BOX_IMAGE, BOX_DIR], { stdio: ["ignore", "pipe", "pipe"] });
+    const child = spawn("docker", ["build", "--label", REVISION_LABEL + "=" + BOX_REVISION, "-t", BOX_IMAGE, BOX_DIR], { stdio: ["ignore", "pipe", "pipe"] });
     let tail = "";
     child.stdout.on("data", function (d) { tail = (tail + d.toString()).slice(-4000); if (onLog) onLog(d.toString()); });
     child.stderr.on("data", function (d) { tail = (tail + d.toString()).slice(-4000); if (onLog) onLog(d.toString()); });
     child.on("error", function (e) { resolve({ ok: false, err: e.message }); });
     child.on("close", function (code) { resolve({ ok: code === 0, err: tail.slice(-1500) }); });
   });
-  box.state = r.ok ? "stopped" : "unknown";
+  const existing = await boxContainerStatus();
+  box.state = existing?.running ? "running" : r.ok ? "stopped" : "unknown";
   return r;
 }
 
 async function boxContainerStatus() {
-  const r = await sh("docker", ["ps", "-a", "--filter", "name=^" + BOX_NAME + "$", "--format", "{{.Names}} {{.Status}}"], 15000);
-  if (!r.ok || !r.out.trim()) return null;
-  const m = r.out.trim().match(/^(\S+)\s+(.*)$/);
-  return { name: m[1], status: m[2], running: /Up /i.test(m[2]) };
+  return inspectDesktop(sh, BOX_NAME);
 }
 
 // 服务桥重启后内存状态会丢：从 docker 现场重新发现容器与端口（幂等，便宜）
 async function boxSyncState() {
+  if (boxBuildPromise || boxStartPromise) return false;
   if (box.state === "running" && box.ports) return true;
   try {
     const st = await boxContainerStatus();
@@ -1257,6 +1263,7 @@ async function boxSyncState() {
       }
       if (ports.http && ports.vnc) {
         box.ports = ports;
+        box.revision = st.revision;
         box.state = "running";
         return true;
       }
@@ -1265,32 +1272,39 @@ async function boxSyncState() {
   return false;
 }
 
-async function boxStart() {
+function boxStart() {
+  if (!boxStartPromise) boxStartPromise = startDesktop().finally(() => { boxStartPromise = null; });
+  return boxStartPromise;
+}
+async function startDesktop() {
   const daemon = await dockerAvailable();
   if (!daemon) { box.state = "nodocker"; return { ok: false, error: "Docker 未安装或未启动（请先打开 Docker Desktop）" }; }
-  const st = await boxContainerStatus();
-  if (st && st.running) { /* 已在跑，直接探测端口 */ }
-  else {
-    if (st) await sh("docker", ["rm", "-f", BOX_NAME], 30000); // 残留容器清理
-    if (!(await boxImageExists())) {
-      const b = await boxBuild();
-      if (!b.ok) return { ok: false, error: "镜像构建失败：\n" + b.err };
-    }
-    box.state = "starting";
-    // 非特权 + 最小能力（对标 systemd-nspawn 的攻击面收缩）
-    const r = await sh("docker", ["run", "-d", "--name", BOX_NAME,
+  try {
+    const result = await ensureDesktop({ run: sh, build: boxBuild, ready: waitDesktopReady,
+      image: BOX_IMAGE, name: BOX_NAME, downloads: VM_HOME, revision: BOX_REVISION,
+      // 非特权 + 最小能力；升级时继续挂载同一 home 卷和工作区。
+      args: [
       "--cap-drop", "ALL", "--security-opt", "no-new-privileges",
       "--pids-limit", "512", "--memory", "2g", "--cpus", "1.5",
       "--shm-size", "512m", "--tmpfs", "/tmp:rw,size=128m",
       "--init", "--restart", "unless-stopped",
+      "-e", "TZ=" + (process.env.TZ || Intl.DateTimeFormat().resolvedOptions().timeZone || "Asia/Shanghai"),
       "-v", "lumen-box-home:/home/node",
       // 下载直通：容器浏览器的下载目录 = 宿主 vm-home（「计算机」页实时可见、可下载；
       // 反向上传到 vm-home 的文件也会出现在容器 Downloads 里供代理使用）
       "-v", path.join(VM_HOME, "") + ":/home/node/Downloads",
-      "-p", "127.0.0.1::3900", "-p", "127.0.0.1::6901",
-      BOX_IMAGE], 60000);
-    if (!r.ok) { box.state = "stopped"; return { ok: false, error: "容器启动失败：" + r.err.slice(0, 400) }; }
-  }
+      "-p", "127.0.0.1::3900", "-p", "127.0.0.1::6901"],
+    });
+    if (result.ok) { box.revision = BOX_REVISION; box.error = ""; }
+    else {
+      box.error = result.error; box.ports = null;
+      const st = await boxContainerStatus(); box.state = st?.running ? "unknown" : "stopped";
+    }
+    return result;
+  } catch (e) { box.state = "unknown"; box.ports = null; box.error = e.message; return { ok: false, error: e.message }; }
+}
+async function waitDesktopReady() {
+  box.state = "starting";
   // 发现宿主端口（随机映射 → docker port 查询）
   const pm = await sh("docker", ["port", BOX_NAME], 15000);
   const ports = { http: null, vnc: null };
@@ -1320,10 +1334,23 @@ async function boxStart() {
 }
 
 async function boxStop() {
+  if (boxStartPromise) await boxStartPromise;
+  if (boxBuildPromise) await boxBuildPromise;
   await sh("docker", ["stop", BOX_NAME], 60000);
   box.state = "stopped";
   box.ports = null;
   return { ok: true };
+}
+
+async function upgradeExistingDesktop() {
+  try {
+    const st = await boxContainerStatus();
+    if (st?.running && belongsToWorkspace(st, VM_HOME) && st.revision !== BOX_REVISION) {
+      console.log("   桌面镜像需要升级，正在构建 Lumi 默认主题（浏览器数据和工作区保留）…");
+      const result = await boxStart();
+      console.log(result.ok ? "   Lumi 桌面升级完成。" : "   桌面升级未完成：" + result.error);
+    }
+  } catch (e) { console.log("   桌面升级检查未完成：" + e.message); }
 }
 
 async function boxFetch(pathname, options) {
@@ -1671,8 +1698,10 @@ function desktopStatus() {
     ok: true,
     state: box.state,
     ports: box.ports,
-    novncUrl: box.state === "running" && box.ports ? "http://127.0.0.1:" + box.ports.vnc + "/vnc.html?autoconnect=1&resize=scale" : null,
+    novncUrl: box.state === "running" && box.ports ? "http://127.0.0.1:" + box.ports.vnc + "/lumen-v2/vnc.html?autoconnect=1&resize=scale" : null,
     image: BOX_IMAGE,
+    upgradeAvailable: box.state === "running" && box.revision !== BOX_REVISION,
+    error: box.error,
     takeover: desktopHumanControl,
   };
 }
@@ -2314,7 +2343,23 @@ const server = http.createServer(async function (req, res) {
     if (daemon) await boxSyncState();
     else box.state = "nodocker";
     const imageReady = daemon ? await boxImageExists() : false;
-    return json(res, 200, Object.assign(desktopStatus(), { daemon: daemon, imageReady: imageReady }));
+    let environment = null;
+    if (box.state === "running") { try { environment = await boxJson("/health"); } catch (_) {} }
+    return json(res, 200, Object.assign(desktopStatus(), { daemon: daemon, imageReady: imageReady, environment }));
+  }
+  if (["GET", "POST"].includes(req.method) && p === "/vm/desktop/appearance") {
+    if (box.state !== "running") await boxSyncState();
+    if (box.state !== "running") return json(res, 503, { ok: false, error: "请先启动 Linux 桌面" });
+    try {
+      let input;
+      if (req.method === "POST") {
+        try { input = JSON.parse((await readBody(req, 9 * 1024 * 1024)).toString("utf8")); }
+        catch (_) { return json(res, 400, { ok: false, error: "请求体非法" }); }
+        if (!input || typeof input !== "object" || Array.isArray(input)) return json(res, 400, { ok: false, error: "外观设置格式错误" });
+      }
+      const result = await boxJson("/appearance", input);
+      return json(res, result.ok ? 200 : 400, result);
+    } catch (e) { return json(res, 502, { ok: false, error: e.message }); }
   }
   if (req.method === "POST" && p === "/vm/desktop/start") {
     const r = await boxStart();
@@ -3551,6 +3596,8 @@ setTimeout(async function () {
 }, 4000);
 
 server.listen(PORT, HOST, function () {
+  // 只升级本工作区已运行的桌面；没有使用过桌面的用户仍按需启动。
+  setImmediate(upgradeExistingDesktop);
   const url = "http://" + (HOST === "0.0.0.0" ? "127.0.0.1" : HOST) + ":" + PORT + "/";
   console.log("🌊 Lumen · 本地服务桥 v3 已启动");
   console.log("   应用网址 " + url + "（浏览器打开即用）");

@@ -14,6 +14,10 @@
 
 const http = require("http");
 const { execFile, spawn } = require("child_process");
+const fs = require("node:fs");
+const { createTheme, APPLICATIONS } = require("./desktop-theme");
+const theme = createTheme();
+let appearanceTail = Promise.resolve();
 
 const PORT = parseInt(process.env.BOX_PORT || "3900", 10);
 const DISPLAY = process.env.DISPLAY || ":0";
@@ -37,7 +41,7 @@ function readBody(req) {
     let size = 0;
     req.on("data", (c) => {
       size += c.length;
-      if (size > 256 * 1024) { reject(new Error("body 超限")); req.destroy(); return; }
+      if (size > (req.url === "/appearance" ? 9 * 1024 * 1024 : 256 * 1024)) { reject(new Error("body 超限")); req.destroy(); return; }
       chunks.push(c);
     });
     req.on("end", () => resolve(Buffer.concat(chunks)));
@@ -367,7 +371,24 @@ http.createServer(async (req, res) => {
     if (req.method === "GET" && p === "/health") {
       let cdp = false;
       try { await httpGetJson(CDP_HTTP + "/json/version", 2500); cdp = true; } catch (e) {}
-      return json(res, 200, { ok: true, uptimeMs: Date.now() - startedAt, browser: cdp, display: DISPLAY });
+      const osRelease = fs.readFileSync("/etc/os-release", "utf8");
+      return json(res, 200, { ok: true, uptimeMs: Date.now() - startedAt, browser: cdp, display: DISPLAY,
+        os: (osRelease.match(/^PRETTY_NAME="(.*)"/m) || [])[1],
+        desktopVersion: 3, appearance: theme.read(),
+        applications: APPLICATIONS.map(([id, name, bin]) => ({ id, name, installed: fs.existsSync("/usr/bin/" + bin) })),
+      });
+    }
+    if (req.method === "GET" && p === "/appearance") return json(res, 200, { ok: true, ...theme.status() });
+    if (req.method === "POST" && p === "/appearance") {
+      if (req.headers.origin && req.headers.origin !== "http://" + req.headers.host) return json(res, 403, { ok: false, error: "仅允许同源外观设置" });
+      let input;
+      try { input = JSON.parse((await readBody(req)).toString("utf8")); }
+      catch (_) { return json(res, 400, { ok: false, error: "请求体非法" }); }
+      // 一次只应用一套外观，上传和保存不会互相覆盖。
+      const update = appearanceTail.catch(() => {}).then(() => theme.apply(input));
+      appearanceTail = update;
+      try { return json(res, 200, { ok: true, ...await update }); }
+      catch (e) { return json(res, 400, { ok: false, error: e.message }); }
     }
     if (req.method === "GET" && (p === "/screen.png" || p === "/screenshot")) {
       const buf = await screenshot();

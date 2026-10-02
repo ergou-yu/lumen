@@ -1115,6 +1115,9 @@
 
     var toolbar = el("div", "vm-toolbar");
     card.appendChild(toolbar);
+    var appearanceBox = el("div", "vm-appearance");
+    appearanceBox.hidden = true;
+    card.appendChild(appearanceBox);
 
     var liveWrap = el("div", "vm-live");
     liveWrap.hidden = true;
@@ -1124,12 +1127,104 @@
     card.appendChild(tasksBox);
 
     card.insertAdjacentHTML("beforeend",
-      '<div class="vm-note" style="margin-top:10px">容器里是一台完整的 Linux 桌面 + 真实浏览器，Cookie 与历史保存在私有卷；每个动作都经宿主 <b>Sentinel</b> 审查（放行 / 阻止 / 请示你批准）。你可以在 Live 画面里随时接管——亲手操作时，Lumi 的下一步会先重新观察再动作。</div>');
+      '<div class="vm-note" style="margin-top:10px">在 Live 画面中接管后，可以使用底部 Dock 打开浏览器、Linux 终端、文件管理器与创作软件。Linux 的 Downloads 文件夹与下面的工作区共用文件，浏览器数据和外观保存在私有卷。接管期间 Lumi 会等待你归还控制权。</div>');
 
     box.appendChild(card);
-    vmDeskNodes = { card: card, chip: chip, statusLine: statusLine, toolbar: toolbar, liveWrap: liveWrap, tasksBox: tasksBox };
+    vmDeskNodes = { card: card, chip: chip, statusLine: statusLine, toolbar: toolbar, appearanceBox: appearanceBox, liveWrap: liveWrap, tasksBox: tasksBox };
 
     refreshVmDesktop(true);
+  }
+
+  function renderVmAppearance() {
+    var box = vmDeskNodes && vmDeskNodes.appearanceBox;
+    if (!box || box.dataset.loaded) return;
+    box.dataset.loaded = "loading";
+    desktopApi("/vm/desktop/appearance").then(function (data) {
+      if (!vmDeskNodes || vmDeskNodes.appearanceBox !== box) return;
+      if (!data || !data.ok) { delete box.dataset.loaded; return; }
+      box.dataset.loaded = "ready";
+      box.innerHTML = "";
+      var details = document.createElement("details");
+      function appearanceName(value) {
+        var preset = (value.presets || []).find(function (p) { return p.id === value.preset; });
+        return value.custom ? "自定义壁纸" : preset ? preset.name : "内置壁纸";
+      }
+      var summary = el("summary", "", "桌面外观 · " + appearanceName(data));
+      details.appendChild(summary);
+      var fields = el("div", "vm-appearance-fields");
+      var preview = el("div", "vm-wallpaper-preview");
+      preview.setAttribute("aria-hidden", "true");
+      fields.appendChild(preview);
+      var choices = el("div", "vm-appearance-choices");
+      var label = el("label", "", "壁纸组合");
+      var select = document.createElement("select");
+      select.setAttribute("aria-label", "Linux 桌面壁纸组合");
+      (data.presets || []).forEach(function (p) {
+        var option = document.createElement("option");
+        option.value = p.id; option.textContent = p.name; option.selected = data.preset === p.id;
+        select.appendChild(option);
+      });
+      label.appendChild(select); choices.appendChild(label);
+      var colorLabel = el("label", "", "标题栏与 Dock 强调色");
+      var color = document.createElement("input");
+      color.type = "color"; color.value = data.accent;
+      color.setAttribute("aria-label", "标题栏与 Dock 强调色");
+      colorLabel.appendChild(color); choices.appendChild(colorLabel);
+      var note = el("div", "vm-note", "外观保存在 Linux 私有卷中，重启后保留。");
+      var buttons = el("div", "vm-toolbar");
+      function showPreview() {
+        var preset = (data.presets || []).find(function (p) { return p.id === select.value; });
+        if (preset) preview.style.background = "linear-gradient(140deg," + preset.colors.join(",") + ")";
+        preview.style.borderColor = color.value;
+      }
+      select.addEventListener("change", function () {
+        var preset = data.presets.find(function (p) { return p.id === select.value; });
+        if (preset) color.value = preset.accent;
+        showPreview();
+      });
+      color.addEventListener("input", showPreview);
+      showPreview();
+      function save(payload) {
+        Array.from(choices.querySelectorAll("button,input,select")).forEach(function (n) { n.disabled = true; });
+        note.textContent = "正在应用外观…";
+        desktopApi("/vm/desktop/appearance", "POST", payload).then(function (r) {
+          if (r && r.ok) {
+            data = r; color.value = r.accent; select.value = r.preset;
+            summary.textContent = "桌面外观 · " + appearanceName(r);
+            note.textContent = "已保存，壁纸、标题栏和 Dock 已更新。";
+            showPreview();
+          } else note.textContent = "设置失败：" + String(r && r.error || "无法连接桌面");
+        }).finally(function () {
+          Array.from(choices.querySelectorAll("button,input,select")).forEach(function (n) { n.disabled = false; });
+        });
+      }
+      function button(text, action) {
+        var btn = el("button", "chip", text); btn.type = "button"; btn.addEventListener("click", action); buttons.appendChild(btn);
+      }
+      button("应用组合", function () { save({ preset: select.value, accent: color.value }); });
+      button("仅改强调色", function () { save({ accent: color.value }); });
+      var file = document.createElement("input");
+      file.type = "file"; file.accept = "image/png,image/jpeg,image/svg+xml,.svg"; file.hidden = true;
+      file.addEventListener("change", function () {
+        var image = file.files && file.files[0];
+        if (!image) return;
+        if (image.size > 6 * 1024 * 1024) { toast("壁纸最大 6 MB"); file.value = ""; return; }
+        var reader = new FileReader();
+        reader.onload = function () {
+          var mime = image.type || (/\.svg$/i.test(image.name) ? "image/svg+xml" : /\.png$/i.test(image.name) ? "image/png" : "image/jpeg");
+          save({ accent: color.value, wallpaper: { mime: mime, data: String(reader.result).split(",")[1] } });
+          file.value = "";
+        };
+        reader.onerror = function () { toast("无法读取壁纸文件"); file.value = ""; };
+        reader.readAsDataURL(image);
+      });
+      choices.appendChild(file);
+      button("上传壁纸", function () { file.click(); });
+      button("恢复默认", function () { save({ reset: true }); });
+      choices.appendChild(buttons); choices.appendChild(note);
+      choices.appendChild(el("div", "vm-note", "PNG / JPEG / SVG，最大 6 MB。不同应用内部的配色由应用自己管理。"));
+      fields.appendChild(choices); details.appendChild(fields); box.appendChild(details);
+    });
   }
 
   function refreshVmDesktop(first) {
@@ -1147,7 +1242,13 @@
       vmDeskNodes.statusLine.innerHTML =
         "Docker：" + (st && st.daemon ? "✅ " + String(st.daemon).slice(0, 14) : "❌ 未运行（打开 Docker Desktop）") +
         " · 镜像：" + (img ? "✅ lumen-box" : "⏳ 未构建（首次启动会自动构建）") +
-        (st && st.ports ? " · 端口 " + st.ports.http + "/" + st.ports.vnc : "");
+        (st && st.environment && st.environment.os ? " · " + esc(st.environment.os) : "") +
+        (st && st.ports ? " · 端口 " + st.ports.http + "/" + st.ports.vnc : "") +
+        (st && st.error ? " · " + esc(st.error.slice(0, 200)) : "");
+      var themed = state === "running" && st.environment && st.environment.desktopVersion >= 2;
+      vmDeskNodes.appearanceBox.hidden = !themed;
+      if (themed) renderVmAppearance();
+      else { vmDeskNodes.appearanceBox.innerHTML = ""; delete vmDeskNodes.appearanceBox.dataset.loaded; }
 
       // 工具栏（按状态重建；按钮少，整建无妨）
       var tb = vmDeskNodes.toolbar;
@@ -1160,6 +1261,19 @@
           desktopApi("/vm/desktop/stop", "POST", {}).then(function () { refreshVmDesktop(); });
         });
         tb.appendChild(stop);
+        if (st.upgradeAvailable) {
+          var upgrade = el("button", "chip solid", "更新 Linux 桌面");
+          upgrade.type = "button";
+          upgrade.addEventListener("click", function () {
+            upgrade.disabled = true;
+            toast("正在更新 Linux 桌面，浏览器数据和工作区会保留…");
+            desktopApi("/vm/desktop/start", "POST", {}).then(function (r) {
+              toast(r && r.ok ? "Linux 桌面已更新" : "更新失败：" + String(r && r.error || ""));
+              refreshVmDesktop();
+            });
+          });
+          tb.appendChild(upgrade);
+        }
       } else if (st && st.daemon) {
         var start = el("button", "chip solid", state === "building" || !img ? "构建并启动（首次较慢）" : "启动虚拟机");
         start.type = "button";
@@ -1218,6 +1332,9 @@
           frame.setAttribute("allow", "clipboard-read; clipboard-write");
           vmDeskNodes.liveWrap.appendChild(frame);
           applyLiveMode(!!st.takeover);
+        } else {
+          var existing = vmDeskNodes.liveWrap.querySelector("iframe");
+          if (existing.src !== st.novncUrl) existing.src = st.novncUrl;
         }
       } else {
         vmDeskNodes.liveWrap.hidden = true;
@@ -1501,7 +1618,7 @@
       // —— 虚拟终端 ——
       var tc = el("div", "vm-card");
       var shellOn = !!store.state.settings.vmShell && d.shell.enabled;
-      tc.appendChild(el("div", "vm-card-head", "⌨ 虚拟终端" +
+      tc.appendChild(el("div", "vm-card-head", "⌨ 宿主工作区命令行（旧版）" +
         '<span class="vm-tag' + (shellOn ? "" : " off") + '">' + (shellOn ? "已开启" : (d.shell.enabled ? "未开启（设置里打开）" : "服务端已禁用")) + "</span>"));
       var term = el("div", "vm-terminal");
       if (shellOn) {
@@ -1536,7 +1653,7 @@
         });
         term.appendChild(log);
       } else if (!shellOn) {
-        term.appendChild(el("div", "vm-empty", "终端默认关闭。它是软沙箱：进程真实运行于本机，仅工作目录与 HOME 被钉在 vm-home/——请到 设置 → 虚拟计算机 里了解边界后再开启。"));
+        term.appendChild(el("div", "vm-empty", "此旧版命令行默认关闭，命令在服务桥主机运行。使用独立 Linux 终端时，请接管上方 Live 画面，再点击 Dock 的终端图标。"));
       }
       tc.appendChild(term);
       box.appendChild(tc);
@@ -1545,7 +1662,7 @@
       var nc = el("div", "vm-card");
       nc.appendChild(el("div", "vm-card-head", "🛡 隔离边界"));
       nc.insertAdjacentHTML("beforeend",
-        '<div class="vm-note">这台「电脑」属于 Lumi 自己：虚拟浏览器与检索在服务桥进程内完成，文件被严格囚在 <code>vm-home/</code>（路径穿越一律拒绝）——<b>浏览与存档不碰你的本机</b>。终端是可选的软沙箱（进程仍在本机运行，仅目录受限），默认关闭。需要 Lumi 操控你的真实电脑时，明确说「用我的电脑……」，它会改走 QCU 并逐步请示。</div>');
+        '<div class="vm-note">Live 桌面、Dock 应用和 Linux 终端运行在独立容器中。容器的 <code>~/Downloads</code> 与服务桥的 <code>vm-home/</code> 共享产物文件；轻量网页阅读器在服务桥进程中运行。这里的旧版宿主命令行默认关闭。需要操作你的 Mac 应用时，请明确说「用我的电脑」。</div>');
       var clearBtn = el("button", "chip", "清空虚拟计算机（历史 + 工作区）");
       clearBtn.type = "button";
       clearBtn.style.marginTop = "10px";

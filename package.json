@@ -1,14 +1,18 @@
 {
   "name": "lumen",
-  "version": "1.4.0",
+  "version": "1.5.0",
   "description": "印象派风格的开源私人 AI 代理：容器化桌面虚拟机 + Sentinel 审批 + 凭证安全区 + Hindsight 深度记忆 + 多模型接入，零依赖 Node 克隆即用",
   "main": "server.js",
   "scripts": {
-    "start": "node server.js"
+    "start": "node server.js",
+    "test": "node --test tests/*.test.js"
   },
   "repository": {
     "type": "git",
     "url": "git+https://github.com/ergou-yu/lumen.git"
   },
-  "license": "MIT"
+  "license": "MIT",
+  "engines": {
+    "node": ">=18"
+  }
 }

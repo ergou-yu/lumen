@@ -246,7 +246,7 @@
       return "按你设定的规则，「" + label + "」我碰都不碰——这一步转交你本人执行。（设置 → 规则与审批 可调整）";
     }
     return label + "失败了，如实报告：\n\n" + String(failReason || "").replace(/^API_FAIL:/, "") +
-      "\n\n没有东西被发出或创建（失败发生在调用阶段）。可到 设置 → 应用连接 点「测试」检查配置。";
+      "\n\n没有收到成功回执。若是网络中断，请先检查目标应用是否已生效，避免重复发送。可到 设置 → 应用连接 点「测试」检查配置。";
   }
 
   function runConnectorFlow(task, text, conn, steps, actMsgId, ctx, hooks) {
@@ -1429,6 +1429,10 @@
    * }
    */
   function runTask(text, hooks) {
+    if (window.LumenContinuity && window.LumenContinuity.ready && store.state.settings.serverTasks !== false &&
+        !/用我的电脑|在这台电脑|本机|真机/.test(text)) {
+      return window.LumenContinuity.runTask(text, hooks);
+    }
     var task = makeTask();
     // 任务绑定发起时的会话：运行期间用户切了新对话，本任务仍写回原会话
     var conv = store.activeConversation();

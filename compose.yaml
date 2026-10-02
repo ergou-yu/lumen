@@ -1,0 +1,25 @@
+services:
+  lumi:
+    build: .
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:8787:8787"
+    environment:
+      LUMEN_ACCESS_TOKEN: ${LUMEN_ACCESS_TOKEN:?Set a private access token in .env}
+      LUMEN_MODEL_TYPE: ${LUMEN_MODEL_TYPE:-openai}
+      LUMEN_MODEL_BASE: ${LUMEN_MODEL_BASE:-}
+      LUMEN_MODEL_NAME: ${LUMEN_MODEL_NAME:-}
+      LUMEN_MODEL_API_KEY: ${LUMEN_MODEL_API_KEY:-}
+      LUMEN_IMAGE_MODEL: ${LUMEN_IMAGE_MODEL:-}
+      LUMEN_PUBLIC_URL: ${LUMEN_PUBLIC_URL:-}
+    volumes:
+      - lumi-data:/data
+    read_only: true
+    tmpfs:
+      - /tmp:size=64m,mode=1777
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+volumes:
+  lumi-data:

@@ -13,7 +13,7 @@
   var BRIDGE_CANDIDATES = (location.protocol === "http:" || location.protocol === "https:")
     ? ["", "http://127.0.0.1:8787"]
     : ["http://127.0.0.1:8787"];
-  window.LumenBridgeBase = BRIDGE_CANDIDATES[BRIDGE_CANDIDATES.length - 1];
+  window.LumenBridgeBase = BRIDGE_CANDIDATES[0];
   var $ = function (sel) { return document.querySelector(sel); };
   var el = function (tag, cls, html) {
     var n = document.createElement(tag);
@@ -190,11 +190,12 @@
 
   function updateModelChip() {
     var cur = window.LumenAI.current();
-    $("#model-chip").textContent = cur ? (cur.model + " · " + cur.name.split(" ")[0] + " ▾") : "演示模式 ▾";
+    var backend = window.LumenContinuity && window.LumenContinuity.model;
+    $("#model-chip").textContent = backend && backend.ready && store.state.settings.serverTasks !== false ? (backend.model + " · 后台 ▾") : cur ? (cur.model + " · " + cur.name.split(" ")[0] + " ▾") : "演示模式 ▾";
   }
 
   function updateStatus() {
-    var n = window.LumenAgent.running;
+    var n = window.LumenAgent.running + (window.LumenContinuity ? window.LumenContinuity.running : 0);
     var statusEl = $("#agent-status");
     var wrap = statusEl.closest(".agent-status");
     if (n > 0) {
@@ -701,6 +702,7 @@
       // 先把挂起中的审批卡自动置为「拒绝」，否则任务会永远等在闸门处
       denyAllApprovals();
       window.LumenAgent.interruptAll();
+      if (window.LumenContinuity) window.LumenContinuity.stop().catch(function (e) { toast(e.message); });
       toast("已中断当前任务 ⏹");
     });
     $("#btn-new-chat").addEventListener("click", function () {
@@ -1176,7 +1178,12 @@
             try { localStorage.setItem("lumen-live-takeover", takeover ? "1" : "0"); } catch (e) {}
           }
           modeBtn.addEventListener("click", function () {
-            applyLiveMode(vmDeskNodes.liveWrap.classList.contains("watch"));
+            var takeover = vmDeskNodes.liveWrap.classList.contains("watch");
+            modeBtn.disabled = true;
+            desktopApi("/vm/desktop/control", "POST", { takeover: takeover }).then(function (r) {
+              if (r && r.ok) applyLiveMode(r.takeover);
+              else toast("接管失败：" + String(r && r.error || ""));
+            }).finally(function () { modeBtn.disabled = false; });
           });
           var reBtn = el("button", "chip", "重连画面");
           reBtn.type = "button";
@@ -1194,9 +1201,7 @@
           frame.src = st.novncUrl;
           frame.setAttribute("allow", "clipboard-read; clipboard-write");
           vmDeskNodes.liveWrap.appendChild(frame);
-          var savedTakeover = false;
-          try { savedTakeover = localStorage.getItem("lumen-live-takeover") === "1"; } catch (e) {}
-          applyLiveMode(savedTakeover);
+          applyLiveMode(!!st.takeover);
         }
       } else {
         vmDeskNodes.liveWrap.hidden = true;
@@ -2924,14 +2929,14 @@
 
     // —— 规则与审批（对标 dots Custom Rules：允许 / 先问 / 转交本人） ——
     var secRules = el("div", "set-section");
-    secRules.appendChild(el("h3", "", "规则与审批 · 按动作定制（允许 / 先问 / 转交本人）"));
+    secRules.appendChild(el("h3", "", "规则与审批 · 按动作定制"));
     var rulesBox = el("div");
     rulesBox.style.cssText = "display:flex;flex-direction:column;gap:8px";
     secRules.appendChild(rulesBox);
     var kIn = document.createElement("input");
     kIn.type = "text"; kIn.placeholder = "动作关键词（空格=同时命中，如：客户 发送）"; kIn.style.width = "200px";
     var mSel = document.createElement("select");
-    [["auto", "无需询问直接做"], ["ask", "行动前先问我"], ["handoff", "转交本人（我碰都不碰）"]].forEach(function (m) {
+    [["auto", "无需询问直接做"], ["explicit", "仅当我明确提到这些动作"], ["ask", "行动前先问我"], ["handoff", "转交本人（我碰都不碰）"]].forEach(function (m) {
       var op = document.createElement("option"); op.value = m[0]; op.textContent = m[1]; mSel.appendChild(op);
     });
     var addRule = el("button", "chip", "添加规则");
@@ -2954,7 +2959,7 @@
         rulesBox.innerHTML = '<div class="vm-empty" style="padding:2px">（暂无规则）示例：「支付」→ 先问我；「删除 文件」→ 转交本人。规则会同步到服务桥，Sentinel 审查动作与聊天审批时优先查规则；硬拦截（恶意站点/SSRF）永不放宽。</div>';
         return;
       }
-      var MODE_NAME = { auto: "✅ 无需询问", ask: "⚠️ 先问我", handoff: "✋ 转交本人" };
+      var MODE_NAME = { auto: "✅ 无需询问", explicit: "💬 明确指示时", ask: "⚠️ 先问我", handoff: "✋ 转交本人" };
       list.forEach(function (r, i) {
         var row = el("div", "vm-file-row");
         row.innerHTML = "<span class='nm'>📋 " + esc(r.keywords) + "</span><span class='meta'>" + (MODE_NAME[r.mode] || r.mode) + "</span>";
@@ -3342,5 +3347,5 @@
     store.audit("Lumen 启动", window.LumenAI.current() ? "已连接模型" : "演示模式", "info");
   }
 
-  window.LumenUI = { init: init };
+  window.LumenUI = { init: init, send: send, switchTab: switchTab, taskHooks: hooks, markdown: md, refreshIdentity: updateIdentity };
 })();

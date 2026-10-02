@@ -1,0 +1,9 @@
+.git
+node_modules
+vm-home
+lumen-*.json
+.env
+*.log
+*.pdf
+run.sh
+tests

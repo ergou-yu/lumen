@@ -2505,11 +2505,11 @@
       "</div>");
     body.appendChild(sec3);
 
-    // —— 应用连接（真实第三方应用：自带凭证，密钥只存本机） ——
+    // —— 应用连接（维护者配置应用一次，使用者登录并授权） ——
     var secConn = el("div", "set-section");
-    secConn.appendChild(el("h3", "", "应用连接 · 真实第三方应用（自带凭证）"));
+    secConn.appendChild(el("h3", "", "应用连接"));
     function connChip(ok, text) {
-      return '<span class="pc-status ' + (ok ? "on" : "off") + '">' + text + "</span>";
+      return '<span class="pc-status ' + (ok ? "on" : "off") + '">' + String(text).replace(/[&<>"']/g, function (c) { return {"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]; }) + "</span>";
     }
     function connField(rowLabel, inputType, inputId, placeholder) {
       var row = el("div", "set-row");
@@ -2535,6 +2535,70 @@
       a.href = href; a.target = "_blank"; a.rel = "noopener noreferrer";
       if (title) a.setAttribute("aria-label", title);
       return a;
+    }
+
+    var oauthUi = {};
+    function connAdvanced(container, link) {
+      var details = document.createElement("details");
+      details.style.marginTop = "14px";
+      details.appendChild(el("summary", "", "高级设置 · 应用维护者配置"));
+      details.querySelector("summary").style.cursor = "pointer";
+      if (link) details.appendChild(link);
+      container.appendChild(details);
+      return details;
+    }
+    function connOAuth(id, name, container, advanced) {
+      var row = el("div", "set-row");
+      var out = el("p", "pc-test", "正在检查应用连接…");
+      out.setAttribute("role", "status");
+      var connect = connBtn("连接 " + name, function () {
+        var baseline = oauthUi[id].resultAt, deadline = Date.now() + 600000, closedAt = 0;
+        // 点击时同步打开授权页，避免异步请求后打开被浏览器拦截。
+        var popup = window.open(bridgeBase() + "/connectors/" + id + "/auth", "_blank");
+        if (!popup) { out.textContent = "浏览器拦截了登录窗口，请允许此站点弹出窗口后重试"; return; }
+        popup.opener = null;
+        connect.disabled = true;
+        out.className = "pc-test";
+        out.textContent = "请在官方登录页选择账户并授权，完成后这里会自动更新";
+        oauthUi[id].waiting = true;
+        function finish(message, ok) {
+          oauthUi[id].waiting = false;
+          connect.disabled = !oauthUi[id].configured;
+          out.className = "pc-test " + (ok ? "ok" : "err");
+          out.textContent = message;
+        }
+        function poll() {
+          if (!document.body.contains(container)) return;
+          desktopApi("/connectors").then(function (d) {
+            refreshConnChips(d);
+            var cfg = d && d.connectors && d.connectors[id];
+            if (cfg && cfg.authResult && cfg.authResult.at !== baseline) {
+              finish(cfg.authResult.ok ? (name + " 已连接" + (cfg.email ? " · " + cfg.email : "")) : cfg.authResult.message, cfg.authResult.ok);
+              return;
+            }
+            if (popup.closed && !closedAt) closedAt = Date.now();
+            if (Date.now() > deadline || (closedAt && Date.now() - closedAt > 5000)) {
+              finish("连接尚未完成，可再次点击连接重试", false); return;
+            }
+            setTimeout(poll, 1500);
+          });
+        }
+        setTimeout(poll, 1000);
+      }, true);
+      connect.disabled = true;
+      var disconnect = connBtn("断开连接", function () {
+        desktopApi("/connectors/save", "POST", {id:id, patch:{clearAuth:true}}).then(function (d) {
+          if (d && d.ok) { refreshConnChips(d); toast(name + " 已断开连接"); }
+          else toast((d && d.error) || "服务桥离线");
+        });
+      });
+      disconnect.hidden = true;
+      row.appendChild(connect); row.appendChild(disconnect);
+      var setup = connBtn("配置应用", function () { advanced.open = true; });
+      setup.hidden = true; row.appendChild(setup);
+      container.appendChild(row); container.appendChild(out);
+      container.appendChild(el("p", "pc-test", "登录并同意授权即可连接。读取与写入权限在「活动 → 应用权限」中管理。"));
+      oauthUi[id] = {connect:connect, disconnect:disconnect, setup:setup, out:out, resultAt:0, configured:false, waiting:false, advanced:advanced};
     }
 
     // —— 飞书 / Lark ——
@@ -2592,11 +2656,13 @@
     var gCard = el("div", "provider-card open");
     var gHead = el("div", "pc-head");
     gHead.innerHTML = '<span class="pc-name">Google · Gmail / 日历</span><span id="conn-google-chip">' + connChip(false, "未配置") + "</span>";
-    gHead.appendChild(connLink("获取 Client ID ↗", "https://console.cloud.google.com/auth/clients", "获取 Google Client ID（打开官方控制台）"));
     gCard.appendChild(gHead);
     var gBody = el("div", "pc-body");
-    gBody.appendChild(connField("Client ID", "text", "g-clientid", "xxxx.apps.googleusercontent.com"));
-    gBody.appendChild(connField("Client Secret", "password", "g-clientsecret", "GOCSPX-…（不回显）"));
+    var gAdvanced = connAdvanced(gBody, connLink("获取 Client ID ↗", "https://console.cloud.google.com/auth/clients", "获取 Google Client ID（打开官方控制台）"));
+    connOAuth("google", "Google", gBody, gAdvanced);
+    gBody.appendChild(gAdvanced);
+    gAdvanced.appendChild(connField("Client ID", "text", "g-clientid", "xxxx.apps.googleusercontent.com"));
+    gAdvanced.appendChild(connField("Client Secret", "password", "g-clientsecret", "GOCSPX-…（不回显）"));
     var gRedirectRow = connField("授权回调 URI", "text", "g-redirect-uri", "正在获取服务桥回调地址…");
     var gRedirectInput = gRedirectRow.querySelector("input");
     gRedirectInput.readOnly = true;
@@ -2608,7 +2674,7 @@
     });
     gCopyRedirect.disabled = true;
     gRedirectRow.appendChild(gCopyRedirect);
-    gBody.appendChild(gRedirectRow);
+    gAdvanced.appendChild(gRedirectRow);
     var gBtnRow = el("div", "set-row");
     var gOut = el("div", "pc-test");
     gBtnRow.appendChild(connBtn("保存", function () {
@@ -2626,14 +2692,6 @@
         } else toast("保存失败：" + ((d && d.error) || "服务桥离线"));
       });
     }, true));
-    gBtnRow.appendChild(connBtn("去 Google 授权", function () {
-      desktopApi("/connectors").then(function (d) {
-        if (!d || !d.ok) { toast("请先保存 Client ID / Secret，并确认服务桥在线"); return; }
-        if (d.googleAuthUrl) window.open(d.googleAuthUrl, "_blank");
-        else if (d.connectors && d.connectors.google && d.connectors.google.authorized) toast("已授权过啦（" + (d.connectors.google.email || "Gmail") + "）");
-        else toast("请先保存 Client ID / Secret");
-      });
-    }));
     gBtnRow.appendChild(connBtn("测试", function () {
       gOut.textContent = "测试中…";
       desktopApi("/connectors/test", "POST", { id: "google" }).then(function (d) {
@@ -2641,19 +2699,14 @@
         gOut.textContent = (d && d.ok && d.msg) || (d && d.error) || "服务桥离线";
       });
     }));
-    gBtnRow.appendChild(connBtn("解除授权", function () {
-      if (!window.confirm("解除 Google 授权？（不会删除已发送的邮件/日程）")) return;
-      desktopApi("/connectors/save", "POST", { id: "google", patch: { clearAuth: true } })
-        .then(function (d) { if (d && d.ok) { toast("已解除授权"); refreshConnChips(d); } });
-    }));
     gBtnRow.appendChild(gOut);
-    gBody.appendChild(gBtnRow);
-    gBody.insertAdjacentHTML("beforeend",
+    gAdvanced.appendChild(gBtnRow);
+    gAdvanced.insertAdjacentHTML("beforeend",
       '<div style="font-size:12.5px;color:var(--ink-faint);margin-top:6px;line-height:1.9">' +
       '① 点上方「获取 Client ID」，选择或创建项目，完成 Google Auth Platform 的品牌信息与受众设置；测试模式时把自己的邮箱加入测试用户。<br>' +
       '② 在项目中启用 Gmail API 和 Google Calendar API。<br>' +
       '③ Clients → Create client，应用类型选「<b>Web application（Web 应用）</b>」，把上方地址加入「Authorized redirect URIs」。<br>' +
-      '④ 创建后复制 Client ID 与 Client Secret 填入这里，保存，再点「去 Google 授权」。Client ID 是应用标识，不是模型 API Key。<br>' +
+      '④ 创建后复制 Client ID 与 Client Secret 填入这里，保存。普通使用者只需点击「连接 Google」。Client ID 是应用标识，不是模型 API Key。<br>' +
       '完成授权后，在「活动 → 应用权限」开放需要的读取/写入。<a href="https://support.google.com/cloud/answer/15549257" target="_blank" rel="noopener noreferrer" style="color:var(--accent)">Google 官方配置说明 ↗</a></div>');
     gCard.appendChild(gBody);
     secConn.appendChild(gCard);
@@ -2735,20 +2788,31 @@
     smtpCard.appendChild(smtpBody);
     secConn.appendChild(smtpCard);
 
-    // —— 微软（设备码授权：Outlook 邮件 + 日历） ——
+    // —— Microsoft（官方登录；设备码备用） ——
     var msCard = el("div", "provider-card open");
     var msHead = el("div", "pc-head");
-    msHead.innerHTML = '<span class="pc-name">微软 · Outlook 邮件 / 日历（设备码授权）</span><span id="conn-ms-chip">' + connChip(false, "未配置") + "</span>";
-    msHead.appendChild(connLink("获取 Client ID ↗", "https://portal.azure.com/#blade/Microsoft_AAD_RegisteredApps/ApplicationsListBlade", "获取 Microsoft Client ID（打开官方应用注册）"));
+    msHead.innerHTML = '<span class="pc-name">Microsoft · Outlook 邮件 / 日历</span><span id="conn-ms-chip">' + connChip(false, "未配置") + "</span>";
     msCard.appendChild(msHead);
     var msBody = el("div", "pc-body");
-    msBody.appendChild(connField("Application (client) ID", "text", "ms-clientid", "00000000-0000-0000-0000-000000000000"));
+    var msAdvanced = connAdvanced(msBody, connLink("获取 Client ID ↗", "https://portal.azure.com/#blade/Microsoft_AAD_RegisteredApps/ApplicationsListBlade", "获取 Microsoft Client ID（打开官方应用注册）"));
+    connOAuth("microsoft", "Microsoft", msBody, msAdvanced);
+    msBody.appendChild(msAdvanced);
+    msAdvanced.appendChild(connField("Application (client) ID", "text", "ms-clientid", "00000000-0000-0000-0000-000000000000"));
+    msAdvanced.appendChild(connField("Client Secret（Web 应用）", "password", "ms-clientsecret", "Web 应用需填写；本机公共客户端留空"));
+    var msRedirectRow = connField("授权回调 URI", "text", "ms-redirect-uri", "正在获取回调地址…");
+    msRedirectRow.querySelector("input").readOnly = true;
+    msRedirectRow.appendChild(connBtn("复制回调地址", function () {
+      var input = msRedirectRow.querySelector("input");
+      if (navigator.clipboard && navigator.clipboard.writeText) navigator.clipboard.writeText(input.value).then(function () { toast("回调地址已复制"); }, function () { input.select(); toast("请手动复制"); });
+      else { input.select(); toast("请手动复制"); }
+    }));
+    msAdvanced.appendChild(msRedirectRow);
     var msBtnRow = el("div", "set-row");
     var msOut = el("div", "pc-test");
     msBtnRow.appendChild(connBtn("保存", function () {
-      desktopApi("/connectors/save", "POST", { id: "microsoft", patch: { clientId: document.getElementById("ms-clientid").value.trim() } })
+      desktopApi("/connectors/save", "POST", { id: "microsoft", patch: { clientId: document.getElementById("ms-clientid").value.trim(), clientSecret: document.getElementById("ms-clientsecret").value.trim() } })
         .then(function (d) {
-          if (d && d.ok) { toast("已保存 client_id"); refreshConnChips(d); }
+          if (d && d.ok) { toast("Microsoft 应用已保存"); document.getElementById("ms-clientsecret").value = ""; refreshConnChips(d); }
           else toast("保存失败：" + ((d && d.error) || "服务桥离线"));
         });
     }, true));
@@ -2778,19 +2842,14 @@
         }
       });
     }));
-    msBtnRow.appendChild(connBtn("解除授权", function () {
-      if (!window.confirm("解除微软授权？")) return;
-      desktopApi("/connectors/save", "POST", { id: "microsoft", patch: { clearAuth: true } })
-        .then(function (d) { if (d && d.ok) { toast("已解除"); refreshConnChips(d); } });
-    }));
     msBtnRow.appendChild(msOut);
-    msBody.appendChild(msBtnRow);
-    msBody.insertAdjacentHTML("beforeend",
+    msAdvanced.appendChild(msBtnRow);
+    msAdvanced.insertAdjacentHTML("beforeend",
       '<div style="font-size:12.5px;color:var(--ink-faint);margin-top:6px;line-height:1.9">' +
       '① 点上方「获取 Client ID」→ 应用注册 → 新注册。需要一个可注册应用的 Microsoft Entra 租户及相应权限。<br>' +
       '② 受支持的账户类型选择支持「个人 Microsoft 账户」的选项；Lumi 当前连接个人 Outlook 账号。<br>' +
       '③ 注册后在「概述 / Overview」复制 <b>Application (client) ID</b>，不是 Object ID 或 Directory (tenant) ID。<br>' +
-      '④ 在「身份验证 / Authentication」启用 <b>Allow public client flows</b> 并保存。回到这里保存 ID，再发起设备码授权。此流程不需要 Client Secret 或重定向 URI。<br>' +
+      '④ 本机应用：在「身份验证 / Authentication」添加「移动和桌面应用」平台及上方回调 URI，保存 ID，Client Secret 留空。云端服务：添加「Web」平台及 HTTPS 回调，并创建 Client Secret（填入 Value）。<br>⑤ 保存后点「连接 Microsoft」即可直接登录授权。设备码仅作备用，使用时另需启用 <b>Allow public client flows</b>。<br>' +
       '完成授权后，在「活动 → 应用权限」开放需要的读取/写入。<a href="https://learn.microsoft.com/entra/identity-platform/quickstart-register-app" target="_blank" rel="noopener noreferrer" style="color:var(--accent)">Microsoft 官方注册说明 ↗</a></div>');
     msCard.appendChild(msBody);
     secConn.appendChild(msCard);
@@ -2852,16 +2911,34 @@
         gRedirectInput.value = d.googleRedirectUri;
         gCopyRedirect.disabled = false;
       }
+      if (d && d.microsoftRedirectUri) document.getElementById("ms-redirect-uri").value = d.microsoftRedirectUri;
       var c = d && d.connectors;
       if (!c) return;
+      ["google", "microsoft"].forEach(function (id) {
+        var state = oauthUi[id], cfg = c[id] || {};
+        state.configured = !!cfg.configured;
+        state.resultAt = cfg.authResult ? cfg.authResult.at : 0;
+        state.connect.textContent = (cfg.authorized ? "重新连接 " : "连接 ") + (id === "google" ? "Google" : "Microsoft");
+        if (!state.waiting) {
+          state.connect.disabled = !cfg.configured;
+          state.out.className = "pc-test " + (cfg.authorized ? "ok" : "");
+          state.out.textContent = cfg.authorized ? ("已连接" + (cfg.email ? " · " + cfg.email : "")) : (cfg.configured ? "选择账户并授权即可连接" : "等待应用维护者完成一次性配置，配置后即可直接登录授权");
+        }
+        state.disconnect.hidden = !cfg.authorized;
+        state.setup.hidden = cfg.configured;
+        var clientInput = document.getElementById(id === "google" ? "g-clientid" : "ms-clientid");
+        if (document.activeElement !== clientInput && (!clientInput.value || cfg.managed)) clientInput.value = cfg.clientId || "";
+        state.advanced.querySelectorAll("input:not([readonly])").forEach(function (input) { input.disabled = !!cfg.managed; });
+        state.advanced.querySelectorAll("button").forEach(function (button) { if (button.textContent === "保存") button.disabled = !!cfg.managed; });
+      });
       var lc = document.getElementById("conn-lark-chip");
       var gc = document.getElementById("conn-google-chip");
       if (lc) lc.innerHTML = connChip(c.lark && c.lark.configured, (c.lark && c.lark.configured) ? ("已配置 · " + ((c.lark.mode === "webhook") ? "群机器人" : "应用")) : "未配置");
-      if (gc) gc.innerHTML = connChip(c.google && c.google.authorized, (c.google && c.google.authorized) ? ("已授权" + (c.google.email ? " · " + c.google.email : "")) : (c.google && c.google.configured ? "待授权" : "未配置"));
+      if (gc) gc.innerHTML = connChip(c.google && c.google.authorized, (c.google && c.google.authorized) ? ("已授权" + (c.google.email ? " · " + c.google.email : "")) : (c.google && c.google.configured ? "待连接" : "应用待配置"));
       var mc = document.getElementById("conn-mail-chip");
       var sc = document.getElementById("conn-ms-chip");
       if (mc) mc.innerHTML = connChip(c.mail && c.mail.configured, (c.mail && c.mail.configured) ? ("已配置 · " + (c.mail.user || c.mail.host)) : "未配置");
-      if (sc) sc.innerHTML = connChip(c.microsoft && c.microsoft.authorized, (c.microsoft && c.microsoft.authorized) ? ("已授权" + (c.microsoft.email ? " · " + c.microsoft.email : "")) : (c.microsoft && c.microsoft.configured ? "待授权" : "未配置"));
+      if (sc) sc.innerHTML = connChip(c.microsoft && c.microsoft.authorized, (c.microsoft && c.microsoft.authorized) ? ("已授权" + (c.microsoft.email ? " · " + c.microsoft.email : "")) : (c.microsoft && c.microsoft.configured ? "待连接" : "应用待配置"));
     }
     desktopApi("/connectors").then(function (d) { if (d && d.ok) refreshConnChips(d); });
     body.appendChild(secConn);

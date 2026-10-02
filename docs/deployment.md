@@ -18,7 +18,17 @@ node server.js
 
 这仍是个人服务，一份数据目录绑定一个个人身份，不要把一份口令发给多个人当作多用户系统。
 
-Google OAuth 在云端需设置 `LUMEN_PUBLIC_URL=https://你的域名`，并在自己的 Google Web 应用中登记完全一致的 `/connectors/google/callback` redirect URI。默认本机回调为 localhost。授权 state 随机、10 分钟有效、只能消费一次，因此回调不依赖 127.0.0.1 与 localhost 之间无法共享的登录 Cookie。[Google OAuth 文档](https://developers.google.com/identity/protocols/oauth2/web-server)
+## OAuth 应用配置（一次）
+
+应用维护者先在 Google / Microsoft 注册 Lumi 的 OAuth 应用，设置服务端应用凭据；使用者随后只需点击“连接”，在官方页面登录并同意授权。仓库未内置已注册的 OAuth 应用。独立自托管实例可在设置 → 应用连接 → 高级设置中配置自己的应用，或使用下面的环境变量；环境配置优先，页面中的凭据输入会锁定。直接运行 Node 时需由启动器或系统服务注入环境变量；Compose 会读取 `.env`。
+
+Google：创建 **Web application**，设置 `LUMEN_GOOGLE_CLIENT_ID` 和 `LUMEN_GOOGLE_CLIENT_SECRET`，启用 Gmail、Google Calendar API，完成品牌、受众与测试用户配置。登记设置页显示的完整回调 URI，默认 `http://localhost:8787/connectors/google/callback`，端口使用实际服务端口。公开提供给其他用户时需满足 Google 对相关 scopes 的发布和验证要求。[Google OAuth 文档](https://developers.google.com/identity/protocols/oauth2/web-server)
+
+Microsoft：当前支持个人 Microsoft 账户。注册支持该受众的应用，并设置 `LUMEN_MICROSOFT_CLIENT_ID`。本机使用 **Mobile and desktop applications** 平台，登记完整 `http://localhost:8787/connectors/microsoft/callback`（按实际端口），Secret 留空；流程使用授权码 + PKCE。云端使用 **Web** 平台、HTTPS 回调，并设置 `LUMEN_MICROSOFT_CLIENT_SECRET` 为创建密钥时的 **Value**。设备码备用流程还需启用 Allow public client flows；它无需回调 URI。[Microsoft 授权码文档](https://learn.microsoft.com/en-us/entra/identity-platform/v2-oauth2-auth-code-flow)
+
+云端两种连接都需设置 `LUMEN_PUBLIC_URL=https://你的域名`，回调分别位于 `/connectors/google/callback` 与 `/connectors/microsoft/callback`。默认本机回调为 localhost。授权 state 随机、10 分钟有效、绑定提供商与应用、只能消费一次；PKCE 的 verifier 仅存服务端。有效回调不依赖跨站 Cookie。成功后 Lumi 自动更新账户，取消或失败会显示结果。重新连接失败不会移除已有有效账户，断开连接会使待完成授权失效。
+
+应用 Secret 与账户令牌不由状态 API 回传，也不进入模型上下文。环境变量中的应用 Secret 不复制到数据文件；账户令牌仍保存在私有数据目录的 0600 连接器文件中。更换应用 ID 后旧账户授权失效，需重新连接；这些能力仍按个人实例设计，未提供多用户账户隔离。
 
 ## Docker Compose
 
@@ -53,7 +63,9 @@ docker compose up -d --build
 | `LUMEN_MODEL_NAME` | 文本/视觉模型名称 |
 | `LUMEN_MODEL_API_KEY` | 自己的模型 Key |
 | `LUMEN_IMAGE_MODEL` | Images API 的图像模型名称 |
-| `LUMEN_PUBLIC_URL` | 云端Google OAuth回调所用的公开HTTPS源 |
+| `LUMEN_PUBLIC_URL` | Google / Microsoft OAuth 回调所用的公开 HTTPS 源 |
+| `LUMEN_GOOGLE_CLIENT_ID` / `LUMEN_GOOGLE_CLIENT_SECRET` | 维护者注册的 Google Web 应用凭据 |
+| `LUMEN_MICROSOFT_CLIENT_ID` / `LUMEN_MICROSOFT_CLIENT_SECRET` | Microsoft 应用 ID；Web 应用需 Secret，本机公共客户端留空 |
 | `LUMEN_VM_SHELL=0` | 禁用旧宿主软沙箱终端 |
 
 访问口令不等于多租户隔离，文件 0600 不等于静态加密，动作审批不等于全网络出口过滤。更多能力边界见 [核查报告](parity-audit-2026-10-02.md)。

@@ -33,7 +33,10 @@ test("HTTP访问鉴权、同源、后台模型保密、关页完成和重启回�
   const cfg=await fetch(base+"/agent/model",{method:"POST",headers:auth,body:JSON.stringify({type:"openai",model:"fixture",baseUrl:"http://127.0.0.1:"+model.address().port,apiKey:"fixture-key"})});assert.equal(cfg.status,200);
   const state=await (await fetch(base+"/agent/state",{headers:auth})).json();assert.equal(JSON.stringify(state).includes("fixture-key"),false);
   const job=await (await fetch(base+"/agent/jobs",{method:"POST",headers:auth,body:JSON.stringify({prompt:"test",channel:"slack",channelTarget:"forged"})})).json();assert.equal(job.job.channel,"web");assert.equal(job.job.channelTarget,"");
-  await delay(1400);let result=await(await fetch(base+"/agent/state",{headers:auth})).json();assert.equal(result.jobs[0].status,"done");assert.equal(result.jobs[0].result,"mock verified");
+  // 等待真实回执，避免机器忙碌时固定 1.4 秒把正常后台任务误判为失败。
+  let result;
+  for(let i=0;i<200;i++){result=await(await fetch(base+"/agent/state",{headers:auth})).json();if(result.jobs[0].status!=="running"&&result.jobs[0].status!=="queued")break;await delay(100);}
+  assert.equal(result.jobs[0].status,"done");assert.equal(result.jobs[0].result,"mock verified");
   child.kill("SIGKILL");await new Promise(r=>child.once("exit",r));await start();result=await(await fetch(base+"/agent/state",{headers:auth})).json();assert.equal(result.jobs[0].status,"done");
   const login=await fetch(base+"/session",{method:"POST",headers:{"Content-Type":"application/json",Origin:base},body:JSON.stringify({token:"test-access"})});assert.equal(login.status,200);assert.match(login.headers.get("set-cookie"),/HttpOnly/);const cookie=login.headers.get("set-cookie").split(";")[0];assert.equal((await fetch(base+"/agent/state",{headers:{Cookie:cookie}})).status,200);
 });

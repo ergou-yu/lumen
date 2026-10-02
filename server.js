@@ -2003,7 +2003,7 @@ setTimeout(async function () {
 const backgroundModel = createModel(DATA_DIR);
 const internalAgentToken = crypto.randomBytes(32).toString("hex");
 const accessToken = process.env.LUMEN_ACCESS_TOKEN || "";
-const googleOauthStates = new Map();
+const oauthStates = new Map();
 const sessionToken = accessToken ? crypto.createHmac("sha256", accessToken).update("lumen-session").digest("hex") : "";
 function sameToken(a, b) {
   const x = Buffer.from(String(a || "")), y = Buffer.from(String(b || ""));
@@ -2106,7 +2106,9 @@ const server = http.createServer(async function (req, res) {
     } catch (_) { return json(res, 400, { ok: false, error: "请求体非法" }); }
   }
   const internal = sameToken(req.headers["x-lumen-internal"], internalAgentToken);
-  const oauthCallback = p === "/connectors/google/callback" && req.method === "GET" && googleOauthStates.get(u.searchParams.get("state"))?.expires > Date.now();
+  const callbackProvider = p.match(/^\/connectors\/(google|microsoft)\/callback$/)?.[1];
+  const callbackState = oauthStates.get(u.searchParams.get("state"));
+  const oauthCallback = req.method === "GET" && callbackProvider && callbackState?.provider === callbackProvider && callbackState.expires > Date.now();
   if (accessToken && !internal && !oauthCallback && !sameToken(req.headers.authorization, "Bearer " + accessToken) &&
       !sameToken((req.headers.cookie || "").split("; ").find(x => x.startsWith("lumen-session="))?.slice(14), sessionToken)) {
     if (req.method === "GET" && p === "/") {
@@ -2454,16 +2456,38 @@ const server = http.createServer(async function (req, res) {
     return json(res, 200, { ok: true, vault: vaultPublic() });
   }
   // —— 应用连接（飞书/Lark · Google · 自动化配方）——
-  // 原则与模型接入一致：用户自带凭证；密钥只存本机 lumen-connectors.json（0600），API 永不回传明文。
+  // 应用维护者配置一次 OAuth 应用，使用者只登录授权；私密凭据不回传给浏览器或模型。
   const CONNECTORS_FILE = path.join(DATA_DIR, "lumen-connectors.json");
   let connectors = {};
   function connectorsLoad() {
     try { connectors = JSON.parse(fs.readFileSync(CONNECTORS_FILE, "utf8")); }
     catch (e) { connectors = {}; }
+    for (const [id, prefix] of [["google","LUMEN_GOOGLE"],["microsoft","LUMEN_MICROSOFT"]]) {
+      const cfg = connectors[id] = connectors[id] || {};
+      const clientId = process.env[prefix + "_CLIENT_ID"];
+      const previousId = cfg._oauthClientId || cfg.clientId;
+      if (clientId) {
+        cfg.clientId = clientId;
+        cfg.clientSecret = process.env[prefix + "_CLIENT_SECRET"] || "";
+      }
+      if (previousId && previousId !== cfg.clientId) clearConnectorAuth(cfg);
+      if (cfg.refreshToken) cfg._oauthClientId = cfg.clientId;
+    }
+  }
+  function clearConnectorAuth(cfg) {
+    for (const key of ["refreshToken","_accessToken","_tokenExp","email","_deviceCode","_deviceExp","_oauthClientId","authResult"]) delete cfg[key];
+    cfg._authRevision = crypto.randomBytes(16).toString("hex");
+  }
+  function managedOAuth(id) {
+    return !!process.env[(id === "google" ? "LUMEN_GOOGLE" : "LUMEN_MICROSOFT") + "_CLIENT_ID"];
   }
   function connectorsSave() {
     try {
-      fs.writeFileSync(CONNECTORS_FILE, JSON.stringify(connectors, null, 2), { mode: 0o600 });
+      const stored = structuredClone(connectors);
+      for (const id of ["google","microsoft"]) if (managedOAuth(id)) {
+        delete stored[id].clientId; delete stored[id].clientSecret;
+      }
+      fs.writeFileSync(CONNECTORS_FILE, JSON.stringify(stored, null, 2), { mode: 0o600 });
       fs.chmodSync(CONNECTORS_FILE, 0o600);
     } catch (e) { console.warn("应用连接配置保存失败：", e.message); }
   }
@@ -2487,6 +2511,9 @@ const server = http.createServer(async function (req, res) {
         configured: !!(g.clientId && g.clientSecret),
         authorized: !!g.refreshToken,
         email: g.email || "",
+        managed: managedOAuth("google"),
+        clientId: g.clientId || "",
+        authResult: g.authResult || null,
       },
       mail: {
         permissions: c.mail?.permissions || { on:false,read:false,write:false },
@@ -2500,6 +2527,9 @@ const server = http.createServer(async function (req, res) {
         authorized: !!(((c.microsoft || {}).refreshToken)),
         email: (c.microsoft || {}).email || "",
         devicePending: !!(((c.microsoft || {})._deviceCode)),
+        managed: managedOAuth("microsoft"),
+        clientId: c.microsoft?.clientId || "",
+        authResult: c.microsoft?.authResult || null,
       },
     };
   }
@@ -2598,7 +2628,31 @@ const server = http.createServer(async function (req, res) {
     return { eventId: ev.data && ev.data.event && ev.data.event.event_id };
   }
 
-  // —— Google OAuth（自带 Client ID，走本机回环回调）——
+  // —— OAuth 官方登录（随机 state + PKCE；回调不依赖跨站 Cookie）——
+  function oauthRedirectUri(provider) {
+    const base = new URL(process.env.LUMEN_PUBLIC_URL || "http://localhost:" + PORT);
+    if (!/^https?:$/.test(base.protocol) || base.username || base.password) throw new Error("LUMEN_PUBLIC_URL非法");
+    return base.origin + "/connectors/" + provider + "/callback";
+  }
+  function oauthStart(provider, cfg) {
+    for (const [s,v] of oauthStates) if (v.expires < Date.now()) oauthStates.delete(s);
+    if (oauthStates.size >= 100) oauthStates.delete(oauthStates.keys().next().value);
+    const state = crypto.randomBytes(32).toString("hex");
+    const verifier = crypto.randomBytes(32).toString("base64url");
+    const redirect = oauthRedirectUri(provider);
+    oauthStates.set(state, { provider, expires:Date.now()+600000, redirect, clientId:cfg.clientId, revision:cfg._authRevision || "", verifier });
+    return { state, redirect_uri:redirect, code_challenge:crypto.createHash("sha256").update(verifier).digest("base64url"), code_challenge_method:"S256" };
+  }
+  function invalidateOAuth(provider) {
+    for (const [state,pending] of oauthStates) if (pending.provider === provider) oauthStates.delete(state);
+  }
+  function oauthPage(provider, ok, message) {
+    const escape = value => String(value).replace(/[&<>"']/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
+    const nonce = crypto.randomBytes(18).toString("base64");
+    res.writeHead(200, { "Content-Type":"text/html; charset=utf-8", "Cache-Control":"no-store", "Referrer-Policy":"no-referrer", "Content-Security-Policy":"default-src 'none'; style-src 'unsafe-inline'; script-src 'nonce-"+nonce+"'; frame-ancestors 'none'; base-uri 'none'" });
+    return res.end('<!doctype html><html lang="zh-CN"><meta charset="utf-8"><title>'+escape(provider)+" · "+(ok ? "已连接" : "连接未完成")+'</title><body style="font:16px system-ui;background:#f5f2eb;color:#344b59;display:grid;place-items:center;min-height:100vh;margin:0"><main style="max-width:520px;padding:32px;text-align:center"><h1>'+(ok ? "已连接 " : "连接未完成 · ")+escape(provider)+'</h1><p>'+escape(message)+'</p><p>返回 Lumi 即可查看连接状态，可以关闭此页。</p><button id="close" style="padding:12px 24px;cursor:pointer">返回 Lumi</button></main><script nonce="'+nonce+'">document.getElementById("close").onclick=()=>window.close();'+(ok ? 'setTimeout(()=>window.close(),1500);' : '')+'</script></body></html>');
+  }
+  // —— Google Gmail / 日历 ——
   const GOOGLE_SCOPES = [
     "https://www.googleapis.com/auth/gmail.send",
     "https://www.googleapis.com/auth/gmail.readonly", // 读收件箱（列表/摘要）；已授权过的用户需重新授权一次
@@ -2606,20 +2660,14 @@ const server = http.createServer(async function (req, res) {
     "https://www.googleapis.com/auth/userinfo.email",
   ].join(" ");
   function googleRedirectUri() {
-    const base = new URL(process.env.LUMEN_PUBLIC_URL || "http://localhost:" + PORT);
-    if (!/^https?:$/.test(base.protocol) || base.username || base.password) throw new Error("LUMEN_PUBLIC_URL非法");
-    return base.origin + "/connectors/google/callback";
+    return oauthRedirectUri("google");
   }
   function googleAuthUrl(cfg) {
-    for (const [s,v] of googleOauthStates) if (v.expires < Date.now()) googleOauthStates.delete(s);
-    if (googleOauthStates.size >= 100) googleOauthStates.delete(googleOauthStates.keys().next().value);
-    const state = crypto.randomBytes(32).toString("hex"), redirect = googleRedirectUri();
-    googleOauthStates.set(state,{expires:Date.now()+600000,redirect,clientId:cfg.clientId});
-    return "https://accounts.google.com/o/oauth2/v2/auth?" + new URLSearchParams({
-      client_id: cfg.clientId, redirect_uri: redirect, state,
+    return "https://accounts.google.com/o/oauth2/v2/auth?" + new URLSearchParams(Object.assign(oauthStart("google",cfg), {
+      client_id: cfg.clientId,
       response_type: "code", scope: GOOGLE_SCOPES,
       access_type: "offline", prompt: "consent",
-    }).toString();
+    })).toString();
   }
   async function googleToken(cfg, params) {
     const r = await fetch("https://oauth2.googleapis.com/token", {
@@ -2764,14 +2812,20 @@ const server = http.createServer(async function (req, res) {
     });
   }
 
-  // —— 微软（个人账户 · 设备码授权 · Graph：Outlook 邮件 + 日历） ——
+  // —— 微软（个人账户 · 官方登录 + 设备码备用 · Graph） ——
   const MS_TENANT = "consumers";
   const MS_SCOPES = "offline_access User.Read Mail.Send Mail.Read Calendars.ReadWrite"; // Mail.Read=读收件箱；改范围后已授权用户需重新设备码授权
+  function msAuthUrl(cfg) {
+    return "https://login.microsoftonline.com/"+MS_TENANT+"/oauth2/v2.0/authorize?"+new URLSearchParams(Object.assign(oauthStart("microsoft",cfg), {
+      client_id:cfg.clientId, response_type:"code", response_mode:"query", scope:MS_SCOPES, prompt:"select_account",
+    })).toString();
+  }
   async function msToken(params) {
     const cfg = connectors.microsoft || {};
     const r = await fetch("https://login.microsoftonline.com/" + MS_TENANT + "/oauth2/v2.0/token", {
       method: "POST", headers: { "Content-Type": "application/x-www-form-urlencoded" },
-      body: new URLSearchParams(Object.assign({ client_id: cfg.clientId }, params)),
+      body: new URLSearchParams(Object.assign({ client_id: cfg.clientId }, cfg.clientSecret ? {client_secret:cfg.clientSecret} : {}, params)),
+      signal: AbortSignal.timeout(15000),
     }).then(function (x) { return x.json(); });
     if (r.error) {
       const pending = r.error === "authorization_pending" || r.error === "slow_down";
@@ -2789,30 +2843,37 @@ const server = http.createServer(async function (req, res) {
       body: new URLSearchParams({ client_id: cfg.clientId, scope: MS_SCOPES }),
     }).then(function (x) { return x.json(); });
     if (r.error) throw new Error("设备码申请失败：" + (r.error_description || r.error) + "（检查 client_id 与重定向 URI 配置：设备码无需重定向）");
+    if (!r.device_code || !r.user_code) throw new Error("Microsoft 未返回设备码");
+    connectorsLoad();
+    if (connectors.microsoft.clientId !== cfg.clientId || connectors.microsoft._authRevision !== cfg._authRevision) throw new Error("应用配置或授权已更改，请重试");
     connectors.microsoft._deviceCode = r.device_code;
     connectors.microsoft._deviceExp = Date.now() + (r.expires_in || 900) * 1000;
     connectorsSave();
-    return { userCode: r.user_code, url: r.verification_uri, interval: r.interval || 5 };
+    return { userCode:r.user_code, url:r.verification_uri, interval:r.interval || 5 };
   }
   async function msPoll() {
     const ms = connectors.microsoft || {};
     if (!ms._deviceCode) throw new Error("先点「发起设备码授权」");
-    if (!ms.refreshToken) {
-      let tk;
-      try { tk = await msToken({ grant_type: "urn:ietf:params:oauth:grant-type:device_code", device_code: ms._deviceCode }); }
-      catch (e) { if (e.pending) return { pending: true }; throw e; }
-      ms.refreshToken = tk.refresh_token;
-      ms._accessToken = tk.access_token;
-      ms._tokenExp = Date.now() + (tk.expires_in || 3600) * 1000;
-      delete ms._deviceCode;
-      const me = await fetch("https://graph.microsoft.com/v1.0/me", {
-        headers: { Authorization: "Bearer " + tk.access_token },
-      }).then(function (x) { return x.json(); }).catch(function () { return {}; });
-      ms.email = (me && (me.userPrincipalName || me.mail)) || "";
-      connectorsSave();
-      console.log("🔗 微软应用连接已授权：" + (ms.email || "(邮箱未读到)"));
-    }
-    return { ok: true, email: ms.email || "" };
+    if (ms._deviceExp <= Date.now()) throw new Error("设备码已过期，请重新发起授权");
+    let tk;
+    try { tk = await msToken({ grant_type:"urn:ietf:params:oauth:grant-type:device_code", device_code:ms._deviceCode }); }
+    catch (e) { if (e.pending) return {pending:true}; throw e; }
+    if (!tk.access_token || !tk.refresh_token) throw new Error("未收到完整的账户授权，请重试");
+    const me = await fetch("https://graph.microsoft.com/v1.0/me", {
+      headers:{Authorization:"Bearer "+tk.access_token}, signal:AbortSignal.timeout(15000),
+    }).then(r=>r.json()).catch(()=>({}));
+    connectorsLoad();
+    const current = connectors.microsoft;
+    if (current.clientId !== ms.clientId || current._deviceCode !== ms._deviceCode || current._authRevision !== ms._authRevision) throw new Error("授权已断开或配置已更改，请重新连接");
+    current.refreshToken = tk.refresh_token;
+    current._accessToken = tk.access_token;
+    current._tokenExp = Date.now()+(tk.expires_in || 3600)*1000;
+    current._oauthClientId = current.clientId;
+    current.email = me.mail || me.userPrincipalName || "";
+    current.authResult = {ok:true, at:Date.now(), message:"Microsoft 已连接"};
+    delete current._deviceCode; delete current._deviceExp;
+    connectorsSave();
+    return {ok:true, email:current.email};
   }
   async function msAccess() {
     const ms = connectors.microsoft;
@@ -2941,48 +3002,63 @@ const server = http.createServer(async function (req, res) {
   }
   // —— 应用连接路由 ——
   if (p === "/connectors" || p.indexOf("/connectors/") === 0) {
-    if (!internal && p !== "/connectors/google/callback" && !ownOrigin(req)) return json(res,403,{ok:false,error:"应用配置仅限同源"});
+    if (!internal && !oauthCallback && !ownOrigin(req)) return json(res,403,{ok:false,error:"应用配置仅限同源"});
     if (req.method === "GET" && p === "/connectors/permissions") return json(res,200,{ok:true,connectors:connectorsPublic()});
     if (req.method === "GET" && p === "/connectors") {
       const pub = connectorsPublic();
       return json(res, 200, {
         ok: true, connectors: pub,
         googleRedirectUri: googleRedirectUri(),
-        googleAuthUrl: (pub.google.configured && !pub.google.authorized) ? googleAuthUrl(connectors.google) : "",
+        microsoftRedirectUri: oauthRedirectUri("microsoft"),
       });
     }
-    if (req.method === "GET" && p === "/connectors/google/auth") {
-      const cfg = connectors.google || {};
-      if (!cfg.clientId || !cfg.clientSecret) return json(res, 400, { ok: false, error: "请先保存 Google Client ID / Secret 再授权" });
-      res.writeHead(302, { Location: googleAuthUrl(cfg) });
+    if (req.method === "GET" && /^\/connectors\/(google|microsoft)\/auth$/.test(p)) {
+      const provider = p.split("/")[2], cfg = connectors[provider] || {};
+      if (!cfg.clientId || (provider === "google" && !cfg.clientSecret)) {
+        return oauthPage(provider === "google" ? "Google" : "Microsoft", false, "Lumi 的应用维护者尚未完成一次性应用配置，请在高级设置中配置后重试。");
+      }
+      res.writeHead(302, { Location:provider === "google" ? googleAuthUrl(cfg) : msAuthUrl(cfg), "Cache-Control":"no-store", "Referrer-Policy":"no-referrer" });
       return res.end();
     }
-    if (req.method === "GET" && p === "/connectors/google/callback") {
-      const q = new URL(req.url, "http://localhost").searchParams;
+    if (req.method === "GET" && callbackProvider) {
+      const q = u.searchParams, provider = callbackProvider, name = provider === "google" ? "Google" : "Microsoft";
+      const pending = oauthStates.get(q.get("state"));
+      oauthStates.delete(q.get("state"));
+      if (!pending || pending.provider !== provider || pending.expires <= Date.now() || pending.clientId !== connectors[provider]?.clientId || pending.revision !== (connectors[provider]?._authRevision || "")) return json(res,403,{ok:false,error:"授权 state 失效，请重新连接"});
       const code = q.get("code");
-      const pending = googleOauthStates.get(q.get("state"));
-      googleOauthStates.delete(q.get("state"));
-      if (!pending || pending.expires <= Date.now() || pending.clientId !== connectors.google?.clientId) return json(res,403,{ok:false,error:"Google授权state失效，请重新发起授权"});
-      const page = function (title, body) {
-        res.writeHead(200, { "Content-Type": "text/html; charset=utf-8" });
-        return res.end('<!doctype html><meta charset="utf-8"><body style="font-family:-apple-system,sans-serif;background:#101418;color:#e8e4da;display:flex;align-items:center;justify-content:center;height:100vh;margin:0"><div style="text-align:center"><div style="font-size:40px">' + title + '</div><p style="color:#9aa3ad">' + body + '</p></div></body>');
-      };
-      if (!code) return page("❌", "授权未完成（未收到 code），可关闭此页回到 Lumen 设置重试");
-      try {
-        const cfg = connectors.google;
-        const tk = await googleToken(cfg, { code: code, grant_type: "authorization_code", redirect_uri: pending.redirect });
-        if (!tk.access_token) throw new Error("Google未返回有效令牌");
-        if (tk.refresh_token) cfg.refreshToken = tk.refresh_token;
-        cfg._accessToken = tk.access_token;
-        cfg._tokenExp = Date.now() + (tk.expires_in || 3600) * 1000;
-        const prof = await fetch("https://www.googleapis.com/oauth2/v2/userinfo", {
-          headers: { Authorization: "Bearer " + tk.access_token },
-        }).then(function (x) { return x.json(); }).catch(function () { return {}; });
-        if (prof.email) cfg.email = prof.email;
+      if (q.has("error") || !code) {
+        connectors[provider].authResult = {ok:false, at:Date.now(), message:"授权已取消或未完成，可重新连接"};
         connectorsSave();
-        console.log("🔗 Google 应用连接已授权：" + (cfg.email || "(邮箱未读取到)"));
-        return page("✅", "Google 已连接" + (cfg.email ? "（" + cfg.email + "）" : "") + "。回到 Lumen 的设置 → 应用连接 即可使用");
-      } catch (e) { return page("❌", "授权失败：" + (e.message || e)); }
+        return oauthPage(name, false, "授权已取消或未完成，可回到 Lumi 重新连接。");
+      }
+      try {
+        const params = { code, grant_type:"authorization_code", redirect_uri:pending.redirect, code_verifier:pending.verifier };
+        const tk = provider === "google" ? await googleToken(connectors.google,params) : await msToken(params);
+        if (!tk.access_token || !tk.refresh_token) throw new Error("未收到完整的持久授权，请重新连接并同意授权");
+        const prof = await fetch(provider === "google" ? "https://www.googleapis.com/oauth2/v2/userinfo" : "https://graph.microsoft.com/v1.0/me", {
+          headers:{ Authorization:"Bearer "+tk.access_token }, signal:AbortSignal.timeout(15000),
+        }).then(r=>r.json()).catch(()=>({}));
+        // 换令牌期间可能修改了应用或权限；重新加载后只更新此账户的授权字段。
+        connectorsLoad();
+        const cfg = connectors[provider];
+        if (cfg.clientId !== pending.clientId || pending.revision !== (cfg._authRevision || "")) throw new Error("应用配置或授权已更改，请重新连接");
+        cfg.refreshToken = tk.refresh_token;
+        cfg._accessToken = tk.access_token;
+        cfg._tokenExp = Date.now()+(tk.expires_in || 3600)*1000;
+        cfg._oauthClientId = cfg.clientId;
+        cfg.email = (provider === "google" ? prof.email : (prof.mail || prof.userPrincipalName)) || "";
+        cfg.authResult = {ok:true, at:Date.now(), message:name+" 已连接"};
+        delete cfg._deviceCode; delete cfg._deviceExp;
+        connectorsSave();
+        return oauthPage(name, true, "账户已连接"+(cfg.email ? "："+cfg.email : "")+"。Lumi 的连接状态会自动更新。");
+      } catch (e) {
+        connectorsLoad();
+        if (connectors[provider]?.clientId === pending.clientId && pending.revision === (connectors[provider]._authRevision || "")) {
+          connectors[provider].authResult = {ok:false, at:Date.now(), message:"连接失败，请检查应用配置后重新连接"};
+          connectorsSave();
+        }
+        return oauthPage(name, false, "授权失败："+String(e.message || e));
+      }
     }
     let cbody = null;
     try {
@@ -3019,11 +3095,11 @@ const server = http.createServer(async function (req, res) {
         larkTokenCache = { token: "", exp: 0 };
       } else if (id === "google") {
         const cur = connectors.google = connectors.google || {};
+        if (managedOAuth(id) && (typeof patch.clientId === "string" || typeof patch.clientSecret === "string")) return json(res,400,{ok:false,error:"OAuth 应用由服务端环境配置，请由维护者修改环境变量"});
+        if (typeof patch.clientId === "string" && patch.clientId.trim() !== cur.clientId) { clearConnectorAuth(cur); invalidateOAuth(id); delete cur.clientSecret; }
         if (typeof patch.clientId === "string") cur.clientId = patch.clientId.trim();
-        if (typeof patch.clientSecret === "string") cur.clientSecret = patch.clientSecret.trim();
-        if (patch.clearAuth) {
-          delete cur.refreshToken; delete cur._accessToken; delete cur.email; cur._tokenExp = 0;
-        }
+        if (typeof patch.clientSecret === "string" && patch.clientSecret.trim()) cur.clientSecret = patch.clientSecret.trim();
+        if (patch.clearAuth) { clearConnectorAuth(cur); invalidateOAuth(id); }
       } else if (id === "mail") {
         const cur = connectors.mail = connectors.mail || {};
         ["host", "port", "user", "pass", "sslMode", "imapHost", "imapPort"].forEach(function (k) {
@@ -3032,15 +3108,16 @@ const server = http.createServer(async function (req, res) {
         cur.port = String(Number(cur.port) || 0);
       } else if (id === "microsoft") {
         const cur = connectors.microsoft = connectors.microsoft || {};
+        if (managedOAuth(id) && (typeof patch.clientId === "string" || typeof patch.clientSecret === "string")) return json(res,400,{ok:false,error:"OAuth 应用由服务端环境配置，请由维护者修改环境变量"});
+        if (typeof patch.clientId === "string" && patch.clientId.trim() !== cur.clientId) { clearConnectorAuth(cur); invalidateOAuth(id); delete cur.clientSecret; }
         if (typeof patch.clientId === "string") cur.clientId = patch.clientId.trim();
-        if (patch.clearAuth) {
-          delete cur.refreshToken; delete cur._accessToken; delete cur.email; delete cur._deviceCode; cur._tokenExp = 0;
-        }
+        if (typeof patch.clientSecret === "string" && patch.clientSecret.trim()) cur.clientSecret = patch.clientSecret.trim();
+        if (patch.clearAuth) { clearConnectorAuth(cur); invalidateOAuth(id); }
       } else return json(res, 400, { ok: false, error: "未知连接 " + id });
       connectorsSave();
       console.log("🔗 应用连接配置已保存：" + id + "（密钥不回显）");
       const pub = connectorsPublic();
-      return json(res, 200, { ok: true, connectors: pub, googleAuthUrl: (pub.google.configured && !pub.google.authorized) ? googleAuthUrl(connectors.google) : "" });
+      return json(res, 200, { ok:true, connectors:pub });
     }
     if (req.method === "POST" && p === "/connectors/test") {
       const id = String(cbody.id || "");

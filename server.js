@@ -2528,6 +2528,7 @@ const server = http.createServer(async function (req, res) {
   // —— Google OAuth（自带 Client ID，走本机回环回调）——
   const GOOGLE_SCOPES = [
     "https://www.googleapis.com/auth/gmail.send",
+    "https://www.googleapis.com/auth/gmail.readonly", // 读收件箱（列表/摘要）；已授权过的用户需重新授权一次
     "https://www.googleapis.com/auth/calendar.events",
     "https://www.googleapis.com/auth/userinfo.email",
   ].join(" ");
@@ -2683,7 +2684,7 @@ const server = http.createServer(async function (req, res) {
 
   // —— 微软（个人账户 · 设备码授权 · Graph：Outlook 邮件 + 日历） ——
   const MS_TENANT = "consumers";
-  const MS_SCOPES = "offline_access User.Read Mail.Send Calendars.ReadWrite";
+  const MS_SCOPES = "offline_access User.Read Mail.Send Mail.Read Calendars.ReadWrite"; // Mail.Read=读收件箱；改范围后已授权用户需重新设备码授权
   async function msToken(params) {
     const cfg = connectors.microsoft || {};
     const r = await fetch("https://login.microsoftonline.com/" + MS_TENANT + "/oauth2/v2.0/token", {
@@ -2779,6 +2780,226 @@ const server = http.createServer(async function (req, res) {
     return { htmlLink: d.webLink || "" };
   }
 
+  // —— IMAP（零依赖：QQ/163/126/Gmail/Outlook 收件箱读取，993 隐式 TLS） ——
+  const IMAP_BY_SMTP = {
+    "smtp.qq.com": "imap.qq.com", "smtp.163.com": "imap.163.com", "smtp.126.com": "imap.126.com",
+    "smtp.gmail.com": "imap.gmail.com", "smtp.office365.com": "outlook.office365.com",
+  };
+  function imapHostOf(cfg) {
+    if (cfg.imapHost) return cfg.imapHost;
+    return IMAP_BY_SMTP[cfg.host] || cfg.host.replace(/^smtp\./, "imap.");
+  }
+  // 编码字解码：=?UTF-8?B?...?= / =?UTF-8?Q?...?=
+  function decodeMimeWord(str) {
+    return String(str || "").replace(/=\?([^?]+)\?([BbQq])\?([^?]*)\?=/g, function (all, cs, enc, txt) {
+      try {
+        if (enc.toUpperCase() === "B") return Buffer.from(txt, "base64").toString("utf8");
+        return Buffer.from(txt.replace(/_/g, " ").replace(/=([0-9A-Fa-f]{2})/g, function (m, h) {
+          return String.fromCharCode(parseInt(h, 16));
+        }), "binary").toString("utf8");
+      } catch (e) { return txt; }
+    });
+  }
+  // IMAP S 表达式解析：(FLAGS (\Seen) ENVELOPE ("d" "s" ...)) → 数组
+  function imapSexpr(src) {
+    let pos = 0;
+    function parseOne() {
+      while (src[pos] === " ") pos++;
+      if (src[pos] === "(") {
+        pos++;
+        const arr = [];
+        while (src[pos] !== ")" && pos < src.length) arr.push(parseOne());
+        pos++; // 吃掉 )
+        return arr;
+      }
+      if (src[pos] === '"') {
+        pos++;
+        let out = "";
+        while (src[pos] !== '"' && pos < src.length) {
+          if (src[pos] === "\\" && src[pos + 1] !== undefined) { out += src[pos + 1]; pos += 2; }
+          else { out += src[pos]; pos++; }
+        }
+        pos++;
+        return out;
+      }
+      const m = /^[^\s()]+/.exec(src.slice(pos));
+      if (!m) { pos++; return ""; }
+      pos += m[0].length;
+      return m[0] === "NIL" ? null : m[0];
+    }
+    return parseOne();
+  }
+  function imapList(cfg, args) {
+    return new Promise(function (resolve, reject) {
+      const host = imapHostOf(cfg);
+      const port = Number(cfg.imapPort) || 993;
+      const limit = Math.min(Math.max(Number(args.limit) || 8, 1), 20);
+      const unreadOnly = !!args.unreadOnly;
+      const sock = tls.connect({ host: host, port: port, servername: host, rejectUnauthorized: !cfg._insecure }, function () {});
+      let chunks = []; // Buffer 累积（字面量按字节）
+      let logical = ""; // 当前逻辑行（字面量内联拼接）
+      let litRest = 0; // >0 时后续字节属于字面量
+      let phase = "greet", tagN = 0, exists = 0, unseens = null, items = [];
+      const timer = setTimeout(function () { blow(new Error("IMAP 超时（" + host + "）")); }, 20000);
+      function blow(e) { clearTimeout(timer); try { sock.destroy(); } catch (e2) {} reject(e); }
+      function done() { clearTimeout(timer); try { sock.end(); } catch (e) {} resolve({ via: "imap:" + host, total: exists, list: items }); }
+      function cmd(what, then) {
+        tagN++;
+        const tag = "a" + tagN;
+        phase = { tag: tag, then: then };
+        sock.write(tag + " " + what + "\r\n");
+      }
+      sock.on("data", function (d) {
+        chunks.push(d);
+        let buf = Buffer.concat(chunks);
+        chunks = [];
+        let cut = 0;
+        for (let i = 0; i < buf.length; ) {
+          if (litRest > 0) {
+            const take = Math.min(litRest, buf.length - i);
+            logical += buf.slice(i, i + take).toString("binary");
+            litRest -= take;
+            i += take;
+            continue;
+          }
+          const nl = buf.indexOf("\r\n", i);
+          if (nl < 0) { logical += buf.slice(i).toString("binary"); i = buf.length; continue; }
+          let line = logical + buf.slice(i, nl).toString("binary");
+          logical = ""; i = nl + 2; cut = i;
+          const lit = /\{(\d+)\}$/.exec(line);
+          if (lit) { litRest = Number(lit[1]); logical = line; continue; }
+          handle(line);
+          if (phase === "done") { cut = i; break; }
+        }
+        if (cut < buf.length) chunks = [buf.slice(cut)];
+      });
+      sock.on("error", function (e) { blow(new Error("IMAP 连接错误：" + e.message)); });
+      function handle(line) {
+        if (phase === "greet") {
+          if (line.indexOf("* OK") !== 0) return blow(new Error("IMAP 问候异常：" + line.slice(0, 60)));
+          phase = "idle";
+          cmd("LOGIN \"" + cfg.user.replace(/"/g, '\\"') + "\" \"" + String(cfg.pass).replace(/"/g, '\\"') + "\"", function (ok) {
+            if (!ok) throw new Error("IMAP 登录失败（检查授权码与 IMAP 服务是否开启）");
+            cmd("SELECT INBOX", function (ok, lines) {
+              if (!ok) throw new Error("IMAP 打开收件箱失败");
+              const exLine = lines.filter(function (l) { return /\* \d+ EXISTS/.test(l); }).pop() || "";
+              const ex = /\* (\d+) EXISTS/.exec(exLine);
+              exists = ex ? Number(ex[1]) : exists;
+              if (exists === 0) { cmd("LOGOUT", function () { phase = "done"; done(); }); return "logout"; }
+              if (unreadOnly) {
+                cmd("SEARCH UNSEEN", function (ok2, lines2) {
+                  if (!ok2) throw new Error("IMAP SEARCH 失败");
+                  const m = /\* SEARCH (.*)/.exec(lines2.find(function (l) { return l.indexOf("* SEARCH") === 0; }) || "");
+                  unseens = m ? m[1].trim().split(/\s+/).filter(Boolean).map(Number) : [];
+                  if (!unseens.length) { cmd("LOGOUT", function () { phase = "done"; done(); }); return "logout"; }
+                  const seqs = unseens.slice(-limit);
+                  cmd("FETCH " + seqs.join(",") + " (ENVELOPE FLAGS)", finishFetch);
+                  return null;
+                });
+                return null;
+              }
+              const from = Math.max(1, exists - limit + 1);
+              cmd("FETCH " + from + ":" + exists + " (ENVELOPE FLAGS)", finishFetch);
+              return null;
+              function finishFetch(ok3, lines3) {
+                if (!ok3) throw new Error("IMAP FETCH 失败");
+                for (const l of lines3) {
+                  if (l.indexOf("* ") !== 0 || l.indexOf("FETCH") < 0) continue;
+                  const open = l.indexOf("(");
+                  if (open < 0) continue;
+                  let sexpr = null;
+                  try { sexpr = imapSexpr(l.slice(open)); } catch (e) { continue; }
+                  let env = null, seen = false;
+                  for (let k = 0; k < sexpr.length - 1; k++) {
+                    if (sexpr[k] === "ENVELOPE" && Array.isArray(sexpr[k + 1])) env = sexpr[k + 1];
+                    if (sexpr[k] === "FLAGS" && Array.isArray(sexpr[k + 1])) seen = sexpr[k + 1].some(function (f) { return String(f).indexOf("Seen") >= 0; });
+                  }
+                  if (!env) continue;
+                  const fromList = env[2] && env[2][0];
+                  items.push({
+                    from: fromList ? ((fromList[0] || "") + " <" + (fromList[2] || "") + "@" + (fromList[3] || "") + ">").trim() : "?",
+                    subject: decodeMimeWord(env[1] || "(无主题)"),
+                    date: env[0] || "",
+                    seen: seen,
+                  });
+                }
+                cmd("LOGOUT", function () { phase = "done"; done(); });
+              }
+            });
+          });
+          return;
+        }
+        if (typeof phase === "object" && phase !== null && line.indexOf(phase.tag + " ") === 0) {
+          const okc = line.indexOf(phase.tag + " OK") === 0;
+          const cur = phase;
+          if (!okc) { return blow(new Error("IMAP 命令失败：" + line.slice(0, 100))); }
+          const r = cur.then(true, cur.unTagged || []);
+          // 回调内部可能已 cmd() 出下一条命令（phase 换成新对象）——此时绝不能覆盖；
+          // 返回 "logout" 表示保持当前 phase 等 LOGOUT 的 OK。
+          if (r !== "logout" && phase === cur) phase = "idle";
+          return;
+        }
+        if (line.indexOf("* ") === 0 && typeof phase === "object" && phase !== null) {
+          (phase.unTagged = phase.unTagged || []).push(line);
+        }
+      }
+    });
+  }
+
+  // —— Gmail 收件箱（OAuth） ——
+  async function gmailList(args) {
+    const limit = Math.min(Math.max(Number(args.limit) || 8, 1), 20);
+    const q = args.unreadOnly ? "is:unread" : "";
+    const listR = await googleCall("https://gmail.googleapis.com/gmail/v1/users/me/messages?maxResults=" + limit + (q ? "&q=" + encodeURIComponent(q) : ""), {});
+    const list = await listR.json().catch(function () { return {}; });
+    if (!listR.ok) {
+      const msg = (list.error && list.error.message) || String(listR.status);
+      if (/scope|permission|access_denied|insufficient/i.test(msg)) throw new Error("Gmail 读取权限不足（新加了读权限）：到 设置 → 应用连接 → Google 重新授权一次");
+      throw new Error("Gmail 列表失败：" + msg);
+    }
+    const out = [];
+    for (const m of (list.messages || []).slice(0, limit)) {
+      const r = await googleCall("https://gmail.googleapis.com/gmail/v1/users/me/messages/" + m.id + "?format=metadata&metadataHeaders=From&metadataHeaders=Subject&metadataHeaders=Date", {});
+      const d = await r.json().catch(function () { return {}; });
+      if (!r.ok) continue;
+      const h = {};
+      ((d.payload && d.payload.headers) || []).forEach(function (x) { h[x.name] = x.value; });
+      out.push({
+        from: decodeMimeWord(h.From || "?"),
+        subject: decodeMimeWord(h.Subject || "(无主题)"),
+        date: h.Date || "",
+        seen: !/UNREAD/.test(String((d.labelIds || []).join(" ")).toUpperCase()),
+      });
+    }
+    return { via: "gmail", total: (list.resultSizeEstimate || out.length), list: out };
+  }
+
+  // —— 微软收件箱（Graph） ——
+  async function graphList(args) {
+    const limit = Math.min(Math.max(Number(args.limit) || 8, 1), 20);
+    let url = "https://graph.microsoft.com/v1.0/me/messages?$top=" + limit + "&$select=subject,from,receivedDateTime,isRead&$orderby=receivedDateTime desc";
+    if (args.unreadOnly) url += "&$filter=isRead eq false";
+    const r = await fetch(url, { headers: { Authorization: "Bearer " + (await msAccess()) } });
+    const d = await r.json().catch(function () { return {}; });
+    if (!r.ok) {
+      const msg = (d.error && d.error.message) || String(r.status);
+      if (/scope|permission|AccessDenied/i.test(msg)) throw new Error("Outlook 读取权限不足（新加了 Mail.Read）：到 设置 → 应用连接 → 微软 重新走一次设备码授权");
+      throw new Error("Outlook 列表失败：" + msg);
+    }
+    return {
+      via: "graph",
+      total: (d["@odata.count"] || (d.value || []).length),
+      list: (d.value || []).map(function (m) {
+        return {
+          from: m.from && m.from.emailAddress ? (m.from.emailAddress.name || "") + " <" + m.from.emailAddress.address + ">" : "?",
+          subject: m.subject || "(无主题)",
+          date: m.receivedDateTime || "",
+          seen: !!m.isRead,
+        };
+      }),
+    };
+  }
+
   // —— 应用连接路由 ——
   if (p === "/connectors" || p.indexOf("/connectors/") === 0) {
     if (req.method === "GET" && p === "/connectors") {
@@ -2853,7 +3074,7 @@ const server = http.createServer(async function (req, res) {
         }
       } else if (id === "mail") {
         const cur = connectors.mail = connectors.mail || {};
-        ["host", "port", "user", "pass", "sslMode"].forEach(function (k) {
+        ["host", "port", "user", "pass", "sslMode", "imapHost", "imapPort"].forEach(function (k) {
           if (typeof patch[k] === "string") cur[k] = patch[k].trim();
         });
         cur.port = String(Number(cur.port) || 0);
@@ -2931,7 +3152,11 @@ const server = http.createServer(async function (req, res) {
           const via = (m.host && m.user && m.pass) ? "smtp" : (ms.refreshToken ? "microsoft" : (g.refreshToken ? "google" : ""));
           if (!via) throw new Error("NOT_CONFIGURED");
           if (action === "send") out = (via === "smtp") ? await smtpSend(m, args) : (via === "microsoft") ? await graphSend(args) : await googleSend(args);
-          else if (action === "event") {
+          else if (action === "read") {
+            if (via === "smtp") out = await imapList(m, args);
+            else if (via === "microsoft") out = await graphList(args);
+            else out = await gmailList(args);
+          } else if (action === "event") {
             if (via === "smtp") throw new Error("SMTP 只能发邮件；建日程请连接微软（设备码）或 Google（OAuth）");
             out = (via === "microsoft") ? await graphEvent(args) : await googleEvent(args);
           } else throw new Error("未知动作 " + action);

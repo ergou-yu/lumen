@@ -2591,7 +2591,7 @@
     gBody.insertAdjacentHTML("beforeend",
       '<div style="font-size:12.5px;color:var(--ink-faint);margin-top:6px;line-height:1.9">' +
       '步骤：① <a href="https://console.cloud.google.com" target="_blank" style="color:var(--accent)">Google Cloud Console</a> 建项目（免费）；② OAuth 同意屏幕：External + 测试模式，把自己邮箱加为测试用户；③ 凭据 → 创建 OAuth 客户端 ID（应用类型选「<b>桌面应用</b>」）；④ 填 Client ID/Secret 点「去授权」。<b>首次授权 Google 会弹「未验证应用」警告——个人自用应用属正常现象</b>，点「高级 → 仍要继续」即可。回调走本机 localhost，凭证只存本机文件。<br>' +
-      "连好后说「<b>发邮件给 xx@xx.com 主题：… 内容：…</b>」「<b>谷歌日历加个日程 周五下午 3 点 牙医</b>」就是真实发送/创建。</div>");
+      "连好后说「<b>发邮件给 xx@xx.com 主题：… 内容：…</b>」「<b>谷歌日历加个日程 周五下午 3 点 牙医</b>」「<b>总结未读邮件</b>」就是真实发送/创建/读取。</div>");
     gCard.appendChild(gBody);
     secConn.appendChild(gCard);
 
@@ -2650,12 +2650,25 @@
         smtpOut.textContent = (d && d.ok && d.msg) || (d && d.error) || "服务桥离线";
       });
     }));
+    smtpBtnRow.appendChild(connBtn("读收件箱试试", function () {
+      smtpOut.textContent = "读取中…";
+      desktopApi("/connectors/action", "POST", { id: "mail", action: "read", args: { limit: 3 } }).then(function (d) {
+        if (d && d.ok) {
+          var lst = ((d.result && d.result.list) || []);
+          smtpOut.className = "pc-test ok";
+          smtpOut.textContent = "✅ 读到 " + lst.length + " 封（最新：" + (lst.length ? (lst[0].subject || "").slice(0, 24) : "空箱") + "）";
+        } else {
+          smtpOut.className = "pc-test err";
+          smtpOut.textContent = (d && d.error) || "服务桥离线";
+        }
+      });
+    }));
     smtpBtnRow.appendChild(smtpOut);
     smtpBody.appendChild(smtpBtnRow);
     smtpBody.insertAdjacentHTML("beforeend",
       '<div style="font-size:12.5px;color:var(--ink-faint);margin-top:6px;line-height:1.9">' +
       "授权码怎么拿：<b>QQ 邮箱</b> 网页版设置 → 账户 → 开启 SMTP 服务 → 生成授权码；<b>163/126</b> 设置 → POP3/SMTP → 开启；<b>Gmail</b> 需先开两步验证 → 应用密码；<b>Outlook</b> 账号安全 → 应用密码。<br>" +
-      "连好后说「<b>发邮件给 xx@xx.com 主题：… 内容：…</b>」就是真实发送。</div>");
+      "连好后说「<b>发邮件给 xx@xx.com 主题：… 内容：…</b>」就是真实发送；说「<b>看看我的未读邮件</b>」「<b>总结一下今天的邮箱</b>」就是真实读取（IMAP 服务器自动推断，也可在保存时手动指定）。</div>");
     smtpCard.appendChild(smtpBody);
     secConn.appendChild(smtpCard);
 
@@ -2711,7 +2724,7 @@
     msBody.insertAdjacentHTML("beforeend",
       '<div style="font-size:12.5px;color:var(--ink-faint);margin-top:6px;line-height:1.9">' +
       'client_id 怎么拿：<a href="https://portal.azure.com/#blade/Microsoft_AAD_RegisteredApps/ApplicationsListBlade" target="_blank" style="color:var(--accent)">Azure 门户 → 应用注册</a>（免费，个人微软账户即可）→ 新注册 → 受支持的账户类型选「个人 Microsoft 账户」→ 复制应用程序(客户端) ID。设备码流程<b>不需要客户端密钥、不需要重定向 URI</b>。<br>' +
-      "连好后说「<b>发邮件给 xx@xx.com 主题：…</b>」「<b>outlook 日历加个日程 周五 3 点</b>」就是真实发送/创建。</div>");
+      "连好后说「<b>发邮件给 xx@xx.com 主题：…</b>」「<b>outlook 日历加个日程 周五 3 点</b>」「<b>看看未读邮件</b>」都是真实发送/创建/读取。</div>");
     msCard.appendChild(msBody);
     secConn.appendChild(msCard);
 

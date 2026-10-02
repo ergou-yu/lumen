@@ -141,7 +141,7 @@
   // —— 应用连接（飞书/Lark · Google 邮件日历）：真实 API 动作，优先于演示流 ——
   var CONNECTOR_LABELS = {
     "lark.send": "发送飞书消息", "lark.doc": "创建飞书文档", "lark.event": "创建飞书日程",
-    "mail.send": "发送邮件", "mail.event": "创建日历日程",
+    "mail.send": "发送邮件", "mail.event": "创建日历日程", "mail.read": "读取收件箱",
     "google.send": "发送 Gmail 邮件", "google.event": "创建 Google 日历日程",
   };
   function connLabel(conn) { return CONNECTOR_LABELS[conn.id + "." + conn.action] || "应用连接动作"; }
@@ -155,6 +155,7 @@
       return { id: "lark", action: "send" };
     }
     if (/发(送)?邮件|邮件发|gmail|outlook|代发邮件/.test(t)) return { id: "mail", action: "send" };
+    if (/收件箱|inbox|未读邮件|(邮件|邮箱).*(看看|查一下|读|总结|扫|摘要|最新|列表|有什么)|帮我看.*(邮件|邮箱)/.test(t)) return { id: "mail", action: "read" };
     if (/日历|日程/.test(t) && (/谷歌|google/.test(t) || /微软|outlook|microsoft/.test(t))) return { id: "mail", action: "event" };
     return null;
   }
@@ -176,6 +177,8 @@
     } else if (key === "mail.send") {
       m = text.match(/发(?:送)?邮件给\s*([^\s，,]+)\s*主题[：:]\s*([^\n]+?)\s*内容[：:]\s*([\s\S]+)/i);
       if (m) return Promise.resolve({ to: m[1].trim(), subject: m[2].trim(), body: m[3].trim() });
+    } else if (key === "mail.read") {
+      return Promise.resolve({ limit: 8, unreadOnly: /未读|unread/.test(text) });
     } else if (key === "lark.doc") {
       m = text.match(/[：:]\s*([\s\S]+)/) || text.match(/(?:写|记|存)(?:一份|一个|篇)?(.+)/);
       if (m) {
@@ -211,6 +214,14 @@
       if (key === "lark.send") det = "消息已" + (((result && result.channel) === "webhook") ? "通过群机器人送达飞书群" : "送达飞书（应用身份）") + "。";
       if (key === "lark.doc") det = "文档已创建：" + ((result && result.url) || "") + ((result && result.note) || "");
       if (key === "lark.event") det = "飞书日程已创建（事件号 " + ((result && result.eventId) || "-") + "）。";
+      if (key === "mail.read") {
+        var list = (result && result.list) || [];
+        var lines = list.map(function (x, i2) {
+          return (i2 + 1) + ". " + (x.seen ? "" : "【未读】") + (x.from || "?") + "\n   " + (x.subject || "(无主题)") + (x.date ? "（" + String(x.date).slice(0, 25) + "）" : "");
+        });
+        var head = "刚才真实读取了你的收件箱" + ((result && result.via) ? "（通道：" + result.via + (args && args.unreadOnly ? " · 仅未读" : "") + "）" : "") + "，共 " + list.length + " 封：\n\n" + lines.join("\n");
+        return { text: head, modelContext: "（以下是刚从用户邮箱真实拉取的邮件列表，是你回答的唯一事实来源——总结/筛选只针对这些邮件，不得虚构任何未列出的邮件）\n" + head };
+      }
       if (key === "mail.send") {
         var via = (result && result.via) || "";
         det = "邮件已发给 " + ((result && result.to) || "收件人") + "（" + (via.indexOf("smtp:") === 0 ? "SMTP 直发 · " + via.slice(5) : via === "graph" ? "微软 Graph" : "Gmail") + "）。";
@@ -312,12 +323,14 @@
       });
     });
     return chain.then(function () {
-      ctx.connectorResult = { text: connectorReply(conn, args, true, result, "") };
+      var rep = connectorReply(conn, args, true, result, "");
+      ctx.connectorResult = (typeof rep === "string") ? { text: rep } : rep;
       return ctx.connectorResult;
     }).catch(function (e) {
       var msg = String((e && e.message) || e);
       if (msg === "DENIED" || msg === "__ABORT__") throw e; // 交给 runTask 统一收尾
-      ctx.connectorResult = { text: connectorReply(conn, args, false, null, msg) };
+      var rep2 = connectorReply(conn, args, false, null, msg);
+      ctx.connectorResult = (typeof rep2 === "string") ? { text: rep2 } : rep2;
       return ctx.connectorResult;
     });
   }
@@ -1592,7 +1605,33 @@
 
       var cfg = window.LumenAI.current();
       var speak;
-      if (ctx.connectorResult) {
+      if (ctx.connectorResult && ctx.connectorResult.modelContext && cfg) {
+        // 读取类：把真实拉取的列表交给模型总结（禁止虚构，事实只有列表本身）
+        var history2 = conv.messages
+          .filter(function (m) { return (m.role === "user" || m.role === "agent") && m.text && m.id !== reply.id; })
+          .slice(-6)
+          .map(function (m) { return { role: m.role === "agent" ? "assistant" : "user", content: m.text }; });
+        var messages2 = [{ role: "system", content: systemPrompt() }]
+          .concat(history2)
+          .concat([{ role: "system", content: ctx.connectorResult.modelContext },
+                   { role: "user", content: "根据上面真实拉取的邮件，回答我刚才的请求（总结要点/挑出重要项）。除列表外不要编造任何内容。" }]);
+        store.audit("调用模型（邮件总结）", cfg.name + " · " + cfg.model, "info");
+        var acc2 = "";
+        speak = window.LumenAI.chatStream({
+          provider: cfg, messages: messages2, signal: task.controller.signal,
+          onDelta: function (d2) { acc2 += d2; hooks.streamDelta(reply.id, d2); },
+        }).then(function () {
+          store.updateMessageIn(conv.id, reply.id, { text: acc2 });
+          ctx.modelAnswer = acc2;
+          store.addUsage(messages2.reduce(function (n, m) { return n + (m.content || "").length; }, 0), acc2.length);
+          return acc2;
+        }).catch(function () {
+          // 模型失败退回原始列表
+          hooks.streamDelta(reply.id, ctx.connectorResult.text);
+          store.updateMessageIn(conv.id, reply.id, { text: ctx.connectorResult.text });
+          return ctx.connectorResult.text;
+        });
+      } else if (ctx.connectorResult) {
         // 应用连接：结果由真实 API 返回，确定性汇报（不让模型自由发挥）
         var ctext = ctx.connectorResult.text || "";
         var cpos = 0;

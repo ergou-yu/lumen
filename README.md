@@ -167,6 +167,8 @@ LUMEN_HOST=0.0.0.0 node server.js   # 或 LUMEN_HOST=0.0.0.0 sh run.sh
 
 邮件统一入口的优先级：SMTP 授权码 > 微软 Graph > Google OAuth——配了哪个用哪个。
 
+**读收件箱也是真的**：说「看看我的未读邮件」「总结一下今天的邮箱」，Lumi 会真实拉取收件箱——SMTP 配置的邮箱走 IMAP（服务器自动推断，QQ/163/126/Gmail/Outlook 全支持），微软走 Graph（Mail.Read），Google 走 Gmail API（gmail.readonly）。拉取的邮件列表作为唯一事实交给模型总结，禁止虚构；读取动作同样经过审批门。注意：v1.4.0 起授权范围新增了读取权限，此前授权过 Google/微软的用户需要重新授权一次。
+
 所有对外发送类动作默认走审批门（尊重规则引擎的 允许/先问/转交 三态与自主程度设置），失败时如实报告上游错误，绝不假装成功。
 
 ## 🧰 内置技能库（skills/ + 技能 Tab）

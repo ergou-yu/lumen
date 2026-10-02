@@ -135,12 +135,14 @@
 
   var currentTab = "chat";
 
-  // —— 头像预置（莫奈真迹三选一）——
-  var AVATARS = { "avatar-1": "assets/avatar-1.jpg", "avatar-2": "assets/avatar-2.jpg", "avatar-3": "assets/avatar-3.jpg" };
+  // 沿用默认头像 ID，让已有用户刷新后也能看到 Lumi 的新形象。
+  var AVATARS = { "avatar-1": "assets/lumi-avatar.jpg", "avatar-2": "assets/avatar-2.jpg", "avatar-3": "assets/avatar-3.jpg" };
   function applyAvatar() {
     var s = store.state.settings;
     var src = AVATARS[s.avatarId] || AVATARS["avatar-1"];
-    $("#agent-avatar").innerHTML = '<img src="' + src + '" alt="">';
+    document.querySelectorAll("[data-agent-avatar]").forEach(function (avatar) {
+      avatar.innerHTML = '<img src="' + src + '" alt="">';
+    });
   }
 
   function switchTab(tab) {
@@ -2262,7 +2264,7 @@
     });
     sec1.appendChild(toneRow);
 
-    // 头像（莫奈真迹三选一）
+    // 头像：Lumi 二次元形象与莫奈画作预置
     sec1.appendChild(el("h3", "", "形象"));
     var avRow = el("div", "radio-row");
     Object.keys(AVATARS).forEach(function (aid) {
@@ -2270,7 +2272,8 @@
       img.src = AVATARS[aid];
       img.style.cssText = "width:52px;height:52px;border-radius:50%;object-fit:cover;cursor:pointer;border:3px solid " +
         (s.avatarId === aid ? "var(--water-deep)" : "transparent");
-      img.title = aid;
+      img.title = aid === "avatar-1" ? "Lumi · 莫奈二次元" : "莫奈画作 · " + aid.slice(-1);
+      img.alt = img.title;
       img.addEventListener("click", function () {
         s.avatarId = aid;
         store.save();

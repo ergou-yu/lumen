@@ -1,0 +1,13 @@
+Generated with the built-in imagegen tool on 2026-10-02.
+Reference: user-provided anime portrait, used only for visual style.
+Asset: assets/lumi-avatar.jpg (square, opaque; circular crop handled by CSS).
+
+Use case: style-transfer
+Asset type: Lumi personal AI companion avatar for two small circular UI slots in an existing Monet-inspired application.
+Input image: stylistic reference only. Reinterpret the attached anime portrait into a new original Lumi portrait; do not preserve its character identity, frame, lettering, logo, or brand footer.
+Primary request: An original anime young adult woman with a short softly tousled silver-blue bob haircut and light wispy bangs, luminous gentle eyes, a calm attentive expression with a subtle smile. A close head-and-shoulders portrait, near-front view with a very slight three-quarter angle, looking toward the viewer. Preserve the reference's delicate fine anime linework, expressive eyes, layered painterly color separation, and fine canvas/screenprint grain.
+Color palette: Monet water-lily colors: misty sky blue #9ec9d8 and #6fa3c2, pond blue #3d6b8e, soft lavender and dusty rose #c98bb9, sage/mint green #7fae7a, warm ivory #f2ead8, tiny accents of golden sunlight #e8b04b. The hair blends silver-blue and lavender reflections; the eyes have soft teal and warm gold reflections; a simple soft lavender collar. Refined pastel colors with enough face/eye contrast for a small avatar; no neon red or oversaturated cyan.
+Scene/backdrop: abstract impressionist pond reflections with a few loose water-lily color dabs, soft painterly strokes and subtle grain. Background is fully opaque.
+Composition/framing: one square 1:1 image, no outer frame or border. The head and face centered in the upper-middle, eyes around 44% from top, the complete hair silhouette and shoulders safely inside the central circular crop. Face occupies about 60% of image height and is clearly recognizable at 34px and 48px. A compact intimate portrait, not a full-body illustration.
+Lighting/mood: soft daylight reflected by water, warm and quietly friendly.
+Constraints: one original anime character, one image. No text, lettering, watermark, logos, typography, reference brand footer, advertising, collage, circular mask, or UI. Keep features readable, avoid heavy scratch marks over the face, no severe glitch distortion.

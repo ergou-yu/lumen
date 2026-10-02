@@ -10,6 +10,8 @@ test("HTTP访问鉴权、同源、后台模型保密、关页完成和重启回�
   async function start(){child=spawn(process.execPath,[path.join(__dirname,"../server.js")],{env:{...process.env,PORT:String(p),LUMEN_NO_OPEN:"1",LUMEN_DATA_DIR:dir,LUMEN_ACCESS_TOKEN:"test-access",LUMEN_MODEL_API_KEY:"",LUMEN_MODEL_BASE:"",LUMEN_HINDSIGHT_URL:""},stdio:"ignore"});for(let i=0;i<80;i++){try{await fetch(base);return;}catch(_){await delay(50);}}throw new Error("server unavailable");}
   await start();assert.equal((await fetch(base+"/agent/state")).status,401);
   const auth={Authorization:"Bearer test-access","Content-Type":"application/json"};
+  const setup=await(await fetch(base+"/connectors",{headers:auth})).json();
+  assert.equal(setup.googleRedirectUri,"http://localhost:"+p+"/connectors/google/callback");
   // 编码斜杠不能把允许的js目录变成整个仓库的下载入口；畸形URI不崩溃。
   assert.equal((await fetch(base+"/js/..%2fpackage.json",{headers:auth})).status,404);
   assert.equal((await fetch(base+"/js/%ZZ",{headers:auth})).status,404);
@@ -34,4 +36,35 @@ test("HTTP访问鉴权、同源、后台模型保密、关页完成和重启回�
   await delay(1400);let result=await(await fetch(base+"/agent/state",{headers:auth})).json();assert.equal(result.jobs[0].status,"done");assert.equal(result.jobs[0].result,"mock verified");
   child.kill("SIGKILL");await new Promise(r=>child.once("exit",r));await start();result=await(await fetch(base+"/agent/state",{headers:auth})).json();assert.equal(result.jobs[0].status,"done");
   const login=await fetch(base+"/session",{method:"POST",headers:{"Content-Type":"application/json",Origin:base},body:JSON.stringify({token:"test-access"})});assert.equal(login.status,200);assert.match(login.headers.get("set-cookie"),/HttpOnly/);const cookie=login.headers.get("set-cookie").split(";")[0];assert.equal((await fetch(base+"/agent/state",{headers:{Cookie:cookie}})).status,200);
+});
+
+test("Microsoft设备码授权发送标准grant_type并取得模拟账号回执",async t=>{
+  const dir=fs.mkdtempSync(path.join(os.tmpdir(),"lumen-ms-auth-")),p=await port(),base="http://127.0.0.1:"+p;
+  const hook=path.join(dir,"mock-fetch.cjs");
+  fs.writeFileSync(hook,`const real=global.fetch;
+global.fetch=async(input,init={})=>{
+ const url=String(input),b=new URLSearchParams(init.body);
+ const reply=data=>new Response(JSON.stringify(data),{headers:{"Content-Type":"application/json"}});
+ if(url==="https://login.microsoftonline.com/consumers/oauth2/v2.0/devicecode"){
+  if(b.get("client_id")!=="fixture-client"||!b.get("scope").includes("Mail.Read"))return reply({error:"invalid_request"});
+  return reply({device_code:"fixture-device",user_code:"FIXTURE",verification_uri:"https://microsoft.com/devicelogin",expires_in:900,interval:5});
+ }
+ if(url==="https://login.microsoftonline.com/consumers/oauth2/v2.0/token"){
+  if(b.get("grant_type")!=="urn:ietf:params:oauth:grant-type:device_code"||b.get("device_code")!=="fixture-device")return reply({error:"unsupported_grant_type"});
+  return reply({access_token:"fixture-access",refresh_token:"fixture-refresh",expires_in:3600});
+ }
+ if(url==="https://graph.microsoft.com/v1.0/me")return reply({mail:"fixture@example.com"});
+ return real(input,init);
+};`);
+  const child=spawn(process.execPath,["--require",hook,path.join(__dirname,"../server.js")],{env:{...process.env,PORT:String(p),LUMEN_NO_OPEN:"1",LUMEN_DATA_DIR:dir,LUMEN_ACCESS_TOKEN:"fixture-auth",LUMEN_MODEL_API_KEY:"",LUMEN_MODEL_BASE:"",LUMEN_HINDSIGHT_URL:""},stdio:"ignore"});
+  t.after(()=>{child.kill("SIGKILL");fs.rmSync(dir,{recursive:true,force:true});});
+  let online=false;for(let i=0;i<80;i++){try{await fetch(base);online=true;break;}catch(_){await delay(50);}}assert.equal(online,true);
+  const headers={Authorization:"Bearer fixture-auth","Content-Type":"application/json"};
+  const post=async(route,body={})=>(await fetch(base+route,{method:"POST",headers,body:JSON.stringify(body)})).json();
+  assert.equal((await post("/connectors/save",{id:"microsoft",patch:{clientId:"fixture-client"}})).ok,true);
+  assert.equal((await post("/connectors/microsoft/start")).userCode,"FIXTURE");
+  assert.equal((await post("/connectors/microsoft/poll")).email,"fixture@example.com");
+  const result=await(await fetch(base+"/connectors",{headers})).json();
+  assert.equal(result.connectors.microsoft.authorized,true);
+  assert.equal(JSON.stringify(result).includes("fixture-refresh"),false);
 });

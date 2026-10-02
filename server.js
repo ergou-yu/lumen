@@ -2799,7 +2799,7 @@ const server = http.createServer(async function (req, res) {
     if (!ms._deviceCode) throw new Error("先点「发起设备码授权」");
     if (!ms.refreshToken) {
       let tk;
-      try { tk = await msToken({ grant_type: "urn:ietf:params:oauth:grants:device_code", device_code: ms._deviceCode }); }
+      try { tk = await msToken({ grant_type: "urn:ietf:params:oauth:grant-type:device_code", device_code: ms._deviceCode }); }
       catch (e) { if (e.pending) return { pending: true }; throw e; }
       ms.refreshToken = tk.refresh_token;
       ms._accessToken = tk.access_token;
@@ -2947,6 +2947,7 @@ const server = http.createServer(async function (req, res) {
       const pub = connectorsPublic();
       return json(res, 200, {
         ok: true, connectors: pub,
+        googleRedirectUri: googleRedirectUri(),
         googleAuthUrl: (pub.google.configured && !pub.google.authorized) ? googleAuthUrl(connectors.google) : "",
       });
     }

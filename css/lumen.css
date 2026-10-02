@@ -815,7 +815,7 @@ svg.ico { width: 20px; height: 20px; fill: none; stroke: currentColor; stroke-wi
   background: rgba(255,253,247,0.8);
 }
 .provider-card.active-prov { border-color: rgba(111,163,194,0.6); box-shadow: 0 0 0 3px rgba(111,163,194,0.15); }
-.pc-head { display: flex; align-items: center; gap: 10px; }
+.pc-head { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
 .pc-name { font-weight: 650; font-size: 14.5px; flex: 1; }
 .pc-status { font-size: 11.5px; padding: 3px 10px; border-radius: 999px; }
 .pc-status.on { background: rgba(109,158,119,0.16); color: #47724f; font-weight: 700; }

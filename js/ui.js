@@ -2513,7 +2513,9 @@
     }
     function connField(rowLabel, inputType, inputId, placeholder) {
       var row = el("div", "set-row");
-      row.appendChild(el("label", "", rowLabel));
+      var label = el("label", "", rowLabel);
+      label.htmlFor = inputId;
+      row.appendChild(label);
       var inp = document.createElement("input");
       inp.type = inputType;
       inp.id = inputId;
@@ -2527,6 +2529,12 @@
       b.type = "button";
       b.addEventListener("click", onClick);
       return b;
+    }
+    function connLink(label, href, title) {
+      var a = el("a", "chip", label);
+      a.href = href; a.target = "_blank"; a.rel = "noopener noreferrer";
+      if (title) a.setAttribute("aria-label", title);
+      return a;
     }
 
     // —— 飞书 / Lark ——
@@ -2581,13 +2589,26 @@
     secConn.appendChild(larkCard);
 
     // —— Google（Gmail 发信 / 日历日程） ——
-    var gCard = el("div", "provider-card");
+    var gCard = el("div", "provider-card open");
     var gHead = el("div", "pc-head");
     gHead.innerHTML = '<span class="pc-name">Google · Gmail / 日历</span><span id="conn-google-chip">' + connChip(false, "未配置") + "</span>";
+    gHead.appendChild(connLink("获取 Client ID ↗", "https://console.cloud.google.com/auth/clients", "获取 Google Client ID（打开官方控制台）"));
     gCard.appendChild(gHead);
     var gBody = el("div", "pc-body");
     gBody.appendChild(connField("Client ID", "text", "g-clientid", "xxxx.apps.googleusercontent.com"));
     gBody.appendChild(connField("Client Secret", "password", "g-clientsecret", "GOCSPX-…（不回显）"));
+    var gRedirectRow = connField("授权回调 URI", "text", "g-redirect-uri", "正在获取服务桥回调地址…");
+    var gRedirectInput = gRedirectRow.querySelector("input");
+    gRedirectInput.readOnly = true;
+    var gCopyRedirect = connBtn("复制回调地址", function () {
+      if (!gRedirectInput.value) return;
+      if (navigator.clipboard && navigator.clipboard.writeText) {
+        navigator.clipboard.writeText(gRedirectInput.value).then(function () { toast("回调地址已复制"); }, function () { gRedirectInput.select(); toast("请手动复制选中的回调地址"); });
+      } else { gRedirectInput.select(); toast("请手动复制选中的回调地址"); }
+    });
+    gCopyRedirect.disabled = true;
+    gRedirectRow.appendChild(gCopyRedirect);
+    gBody.appendChild(gRedirectRow);
     var gBtnRow = el("div", "set-row");
     var gOut = el("div", "pc-test");
     gBtnRow.appendChild(connBtn("保存", function () {
@@ -2629,8 +2650,11 @@
     gBody.appendChild(gBtnRow);
     gBody.insertAdjacentHTML("beforeend",
       '<div style="font-size:12.5px;color:var(--ink-faint);margin-top:6px;line-height:1.9">' +
-      '步骤：① <a href="https://console.cloud.google.com" target="_blank" style="color:var(--accent)">Google Cloud Console</a> 建项目（免费）；② OAuth 同意屏幕：External + 测试模式，把自己邮箱加为测试用户；③ 凭据 → 创建 OAuth 客户端 ID（应用类型选「<b>桌面应用</b>」）；④ 填 Client ID/Secret 点「去授权」。<b>首次授权 Google 会弹「未验证应用」警告——个人自用应用属正常现象</b>，点「高级 → 仍要继续」即可。回调走本机 localhost，凭证只存本机文件。<br>' +
-      "连好后说「<b>发邮件给 xx@xx.com 主题：… 内容：…</b>」「<b>谷歌日历加个日程 周五下午 3 点 牙医</b>」「<b>总结未读邮件</b>」就是真实发送/创建/读取。</div>");
+      '① 点上方「获取 Client ID」，选择或创建项目，完成 Google Auth Platform 的品牌信息与受众设置；测试模式时把自己的邮箱加入测试用户。<br>' +
+      '② 在项目中启用 Gmail API 和 Google Calendar API。<br>' +
+      '③ Clients → Create client，应用类型选「<b>Web application（Web 应用）</b>」，把上方地址加入「Authorized redirect URIs」。<br>' +
+      '④ 创建后复制 Client ID 与 Client Secret 填入这里，保存，再点「去 Google 授权」。Client ID 是应用标识，不是模型 API Key。<br>' +
+      '完成授权后，在「活动 → 应用权限」开放需要的读取/写入。<a href="https://support.google.com/cloud/answer/15549257" target="_blank" rel="noopener noreferrer" style="color:var(--accent)">Google 官方配置说明 ↗</a></div>');
     gCard.appendChild(gBody);
     secConn.appendChild(gCard);
 
@@ -2712,12 +2736,13 @@
     secConn.appendChild(smtpCard);
 
     // —— 微软（设备码授权：Outlook 邮件 + 日历） ——
-    var msCard = el("div", "provider-card");
+    var msCard = el("div", "provider-card open");
     var msHead = el("div", "pc-head");
     msHead.innerHTML = '<span class="pc-name">微软 · Outlook 邮件 / 日历（设备码授权）</span><span id="conn-ms-chip">' + connChip(false, "未配置") + "</span>";
+    msHead.appendChild(connLink("获取 Client ID ↗", "https://portal.azure.com/#blade/Microsoft_AAD_RegisteredApps/ApplicationsListBlade", "获取 Microsoft Client ID（打开官方应用注册）"));
     msCard.appendChild(msHead);
     var msBody = el("div", "pc-body");
-    msBody.appendChild(connField("Azure 应用 client_id", "text", "ms-clientid", "00000000-…（应用注册免费，公共客户端无需密钥）"));
+    msBody.appendChild(connField("Application (client) ID", "text", "ms-clientid", "00000000-0000-0000-0000-000000000000"));
     var msBtnRow = el("div", "set-row");
     var msOut = el("div", "pc-test");
     msBtnRow.appendChild(connBtn("保存", function () {
@@ -2762,8 +2787,11 @@
     msBody.appendChild(msBtnRow);
     msBody.insertAdjacentHTML("beforeend",
       '<div style="font-size:12.5px;color:var(--ink-faint);margin-top:6px;line-height:1.9">' +
-      'client_id 怎么拿：<a href="https://portal.azure.com/#blade/Microsoft_AAD_RegisteredApps/ApplicationsListBlade" target="_blank" style="color:var(--accent)">Azure 门户 → 应用注册</a>（免费，个人微软账户即可）→ 新注册 → 受支持的账户类型选「个人 Microsoft 账户」→ 复制应用程序(客户端) ID。设备码流程<b>不需要客户端密钥、不需要重定向 URI</b>。<br>' +
-      "连好后说「<b>发邮件给 xx@xx.com 主题：…</b>」「<b>outlook 日历加个日程 周五 3 点</b>」「<b>看看未读邮件</b>」都是真实发送/创建/读取。</div>");
+      '① 点上方「获取 Client ID」→ 应用注册 → 新注册。需要一个可注册应用的 Microsoft Entra 租户及相应权限。<br>' +
+      '② 受支持的账户类型选择支持「个人 Microsoft 账户」的选项；Lumi 当前连接个人 Outlook 账号。<br>' +
+      '③ 注册后在「概述 / Overview」复制 <b>Application (client) ID</b>，不是 Object ID 或 Directory (tenant) ID。<br>' +
+      '④ 在「身份验证 / Authentication」启用 <b>Allow public client flows</b> 并保存。回到这里保存 ID，再发起设备码授权。此流程不需要 Client Secret 或重定向 URI。<br>' +
+      '完成授权后，在「活动 → 应用权限」开放需要的读取/写入。<a href="https://learn.microsoft.com/entra/identity-platform/quickstart-register-app" target="_blank" rel="noopener noreferrer" style="color:var(--accent)">Microsoft 官方注册说明 ↗</a></div>');
     msCard.appendChild(msBody);
     secConn.appendChild(msCard);
 
@@ -2820,6 +2848,10 @@
     secConn.appendChild(bCard);
 
     function refreshConnChips(d) {
+      if (d && d.googleRedirectUri && document.getElementById("g-redirect-uri")) {
+        gRedirectInput.value = d.googleRedirectUri;
+        gCopyRedirect.disabled = false;
+      }
       var c = d && d.connectors;
       if (!c) return;
       var lc = document.getElementById("conn-lark-chip");

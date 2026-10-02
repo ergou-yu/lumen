@@ -68,6 +68,8 @@ docker build -t lumen-box vm-box/
 
 连接器可配置 IMAP/SMTP、Google、Microsoft Graph、飞书及已有应用路径。在活动 → 应用权限明确启用、授予读取或写入，默认禁用，服务端检查实际调用；邮件统一入口使用 Google/微软时还检查实际账号的权限。邮件、日历、文档动作取决于实际账号、OAuth scopes 与应用授权；不能把一个开关视为已连接。
 
+设置 → 应用连接中，Google 和 Microsoft 卡片的“获取 Client ID”可直达官方控制台。Google 按 Web 应用注册，并复制卡片显示的授权回调 URI；Microsoft 从应用概述复制 Application (client) ID，并启用公共客户端流程以使用设备码授权。卡片内附有步骤及官方文档。
+
 收件箱新增完整 IMAP/Gmail/Graph 入口，支持未读筛选、中文 MIME 和 IMAP literal 分包。后台读取过滤明显验证码/重置密码邮件主题；这不是完整正文敏感信息分类。
 
 活动页可配置 **Slack / Teams / WhatsApp** 的本人文本私聊入口。需要自己的平台应用、凭证、本人 ID 和公开 HTTPS webhook：
@@ -120,7 +122,7 @@ LUMEN_HOST=0.0.0.0 LUMEN_ACCESS_TOKEN=你生成的高强度口令 node server.js
 npm test
 ```
 
-20 项自动检查覆盖后台持久化、未知外部结果不重发、权限、计划/时区/DST、子任务、模型格式、渠道签名、IMAP 分包和版本更新。平台与模型测试使用本地模拟，不代表真实账号端到端成功。附带 Node 18/22 的 [Actions 工作流示例](docs/ci-test-workflow.yml)。当前 GitHub 登录未授予 workflow 权限，示例尚未安装到 Actions，远端 CI 未运行。
+21 项自动检查覆盖后台持久化、未知外部结果不重发、权限、计划/时区/DST、子任务、模型格式、渠道签名、IMAP 分包、Microsoft 设备码请求和版本更新。平台与模型测试使用本地模拟，不代表真实账号端到端成功。附带 Node 18/22 的 [Actions 工作流示例](docs/ci-test-workflow.yml)。当前 GitHub 登录未授予 workflow 权限，示例尚未安装到 Actions，远端 CI 未运行。
 
 设置 → 更新分别显示本地代码版本与当前服务版本。拉取代码不会替换正在运行的 Node 进程；显示“待重启”时，请在原终端停止服务并用原启动命令重新启动，再刷新网页。应用内更新使用 `git pull --ff-only`，本地未提交修改会拒绝覆盖。离线或远端检查失败时显示无法确认，不报告“已是最新”。
 

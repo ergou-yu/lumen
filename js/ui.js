@@ -2668,7 +2668,7 @@
       var row = el("div", "set-row");
       var out = el("p", "pc-test", "正在检查应用连接…");
       out.setAttribute("role", "status");
-      var connect = connBtn("连接 " + name, function () {
+      var connect = connBtn("连接" + (id === "lark" ? "" : " ") + name, function () {
         var baseline = oauthUi[id].resultAt, deadline = Date.now() + 600000, closedAt = 0;
         // 点击时同步打开授权页，避免异步请求后打开被浏览器拦截。
         var popup = window.open(bridgeBase() + "/connectors/" + id + "/auth", "_blank");
@@ -2690,7 +2690,8 @@
             refreshConnChips(d);
             var cfg = d && d.connectors && d.connectors[id];
             if (cfg && cfg.authResult && cfg.authResult.at !== baseline) {
-              finish(cfg.authResult.ok ? (name + " 已连接" + (cfg.email ? " · " + cfg.email : "")) : cfg.authResult.message, cfg.authResult.ok);
+              var account = cfg.accountName || cfg.email;
+              finish(cfg.authResult.ok ? (name + " 已连接" + (account ? " · " + account : "")) : cfg.authResult.message, cfg.authResult.ok);
               return;
             }
             if (popup.closed && !closedAt) closedAt = Date.now();
@@ -2715,37 +2716,50 @@
       setup.hidden = true; row.appendChild(setup);
       container.appendChild(row); container.appendChild(out);
       container.appendChild(el("p", "pc-test", "登录并同意授权即可连接。读取与写入权限在「活动 → 应用权限」中管理。"));
-      oauthUi[id] = {connect:connect, disconnect:disconnect, setup:setup, out:out, resultAt:0, configured:false, waiting:false, advanced:advanced};
+      oauthUi[id] = {name:name, connect:connect, disconnect:disconnect, setup:setup, out:out, resultAt:0, configured:false, managed:false, waiting:false, fieldValues:{}, advanced:advanced};
     }
 
     // —— 飞书 / Lark ——
-    var larkCard = el("div", "provider-card");
+    var larkCard = el("div", "provider-card open");
     var larkHead = el("div", "pc-head");
     larkHead.innerHTML = '<span class="pc-name">飞书 / Lark</span><span id="conn-lark-chip">' + connChip(false, "未配置") + "</span>";
     larkCard.appendChild(larkHead);
     var larkBody = el("div", "pc-body");
-    larkBody.appendChild(connField("模式", "text", "lark-mode", "app 或 webhook（默认 app）"));
-    larkBody.appendChild(connField("区域", "text", "lark-region", "feishu（国内）或 larksuite（国际），默认 feishu"));
-    larkBody.appendChild(connField("App ID", "text", "lark-appid", "cli_xxxxxxxx（应用模式）"));
-    larkBody.appendChild(connField("App Secret", "password", "lark-appsecret", "应用模式密钥（不回显）"));
-    larkBody.appendChild(connField("群 Webhook", "password", "lark-webhook", "https://open.feishu.cn/open-apis/bot/v2/hook/…（webhook 模式）"));
-    larkBody.appendChild(connField("默认接收者", "text", "lark-chatid", "群 chat_id（oc_…）或对方邮箱（应用模式发消息/私信）"));
+    var larkAdvanced = connAdvanced(larkBody, connLink("注册 Lumi 飞书应用 ↗", "https://open.feishu.cn/app", "打开飞书开发者后台"));
+    connOAuth("lark", "飞书账户", larkBody, larkAdvanced);
+    larkBody.appendChild(larkAdvanced);
+    larkAdvanced.appendChild(connField("模式", "text", "lark-mode", "oauth（账户授权）/ app（应用机器人）/ webhook（群机器人）"));
+    larkAdvanced.appendChild(connField("区域", "text", "lark-region", "feishu（国内）；larksuite（国际，仅机器人模式）"));
+    larkAdvanced.appendChild(connField("App ID", "text", "lark-appid", "cli_xxxxxxxx（Lumi 应用标识）"));
+    larkAdvanced.appendChild(connField("App Secret", "password", "lark-appsecret", "仅存服务端，不回显；留空保留原值"));
+    larkAdvanced.appendChild(connField("授权范围", "text", "lark-scopes", "留空使用消息、文档、日历及离线授权"));
+    var larkRedirectRow = connField("授权回调 URI", "text", "lark-redirect-uri", "正在获取服务桥回调地址…");
+    var larkRedirectInput = larkRedirectRow.querySelector("input");
+    larkRedirectInput.readOnly = true;
+    larkRedirectRow.appendChild(connBtn("复制回调地址", function () {
+      if (!larkRedirectInput.value) return;
+      if (navigator.clipboard && navigator.clipboard.writeText) {
+        navigator.clipboard.writeText(larkRedirectInput.value).then(function () { toast("回调地址已复制"); }, function () { larkRedirectInput.select(); toast("请手动复制选中的回调地址"); });
+      } else { larkRedirectInput.select(); toast("请手动复制选中的回调地址"); }
+    }));
+    larkAdvanced.appendChild(larkRedirectRow);
+    larkAdvanced.appendChild(connField("群 Webhook", "password", "lark-webhook", "https://open.feishu.cn/open-apis/bot/v2/hook/…（webhook 模式）"));
+    larkAdvanced.appendChild(connField("默认接收者", "text", "lark-chatid", "群 chat_id（oc_…）、open_id 或对方邮箱"));
     var larkBtnRow = el("div", "set-row");
     var larkOut = el("div", "pc-test");
     larkBtnRow.appendChild(connBtn("保存", function () {
-      desktopApi("/connectors/save", "POST", {
-        id: "lark",
-        patch: {
-          mode: document.getElementById("lark-mode").value.trim(),
-          region: document.getElementById("lark-region").value.trim(),
-          appId: document.getElementById("lark-appid").value.trim(),
-          appSecret: document.getElementById("lark-appsecret").value.trim(),
-          webhook: document.getElementById("lark-webhook").value.trim(),
-          defaultChatId: document.getElementById("lark-chatid").value.trim(),
-        },
-      }).then(function (d) {
+      var patch = { mode:document.getElementById("lark-mode").value.trim() || "oauth", defaultChatId:document.getElementById("lark-chatid").value.trim() };
+      var webhook = document.getElementById("lark-webhook").value.trim();
+      if (webhook) patch.webhook = webhook;
+      if (!oauthUi.lark.managed) {
+        patch.region = document.getElementById("lark-region").value.trim();
+        patch.appId = document.getElementById("lark-appid").value.trim();
+        patch.appSecret = document.getElementById("lark-appsecret").value.trim();
+        patch.oauthScopes = document.getElementById("lark-scopes").value.trim();
+      }
+      desktopApi("/connectors/save", "POST", {id:"lark", patch:patch}).then(function (d) {
         if (d && d.ok) {
-          toast("飞书配置已保存（密钥只存本机）");
+          toast("飞书配置已保存（密钥仅存服务端）");
           document.getElementById("lark-appsecret").value = "";
           document.getElementById("lark-webhook").value = "";
           refreshConnChips(d);
@@ -2760,12 +2774,13 @@
       });
     }));
     larkBtnRow.appendChild(larkOut);
-    larkBody.appendChild(larkBtnRow);
-    larkBody.insertAdjacentHTML("beforeend",
+    larkAdvanced.appendChild(larkBtnRow);
+    larkAdvanced.insertAdjacentHTML("beforeend",
       '<div style="font-size:12.5px;color:var(--ink-faint);margin-top:6px;line-height:1.9">' +
-      "两种连法：<b>① 群机器人</b>——飞书群 → 设置 → 群机器人 → 添加「自定义机器人」，把 Webhook 填进来（只能发群消息，最简单）；" +
-      '<b>② 自建应用</b>——<a href="https://open.feishu.cn/app" target="_blank" style="color:var(--accent)">open.feishu.cn/app</a> 创建企业自建应用，开启「机器人」能力并加 im:message:send（发消息）、docx:document（文档）、calendar:calendar（日程）权限，发布后把 App ID/Secret 填进来，再把机器人拉进群。<br>' +
-      "连好后对 Lumi 说「<b>飞书发：今晚 8 点开会</b>」「<b>把这份笔记存到飞书文档</b>」就是真实发送。</div>");
+      '<b>账户授权（oauth）</b>：维护者在飞书开发者后台创建 Lumi 应用，将上方完整回调地址加入「安全设置 → 重定向 URL」。开通用户身份权限 offline_access、im:message、im:message.send_as_user、docx:document、calendar:calendar、calendar:calendar:read；启用刷新 user_access_token，发布并设置应用可用范围。保存 App ID / Secret 后，使用者只需点击「连接飞书账户」。<br>' +
+      '自建应用仅限本企业；面向其他企业需要商店应用资质及发布。App Secret 保留在受控服务端，不随公开客户端分发。账户授权目前支持飞书国内版。<br>' +
+      '<b>应用机器人（app）</b>：开启机器人能力及应用身份权限，发布并将机器人加入目标群；<b>群机器人（webhook）</b>：保存群的自定义机器人 Webhook，仅用于发群消息。<br>' +
+      '<a href="https://open.feishu.cn/document/sso/web-application-end-user-consent/guide" target="_blank" rel="noopener noreferrer" style="color:var(--accent)">飞书官方授权说明 ↗</a></div>');
     larkCard.appendChild(larkBody);
     secConn.appendChild(larkCard);
 
@@ -3029,28 +3044,40 @@
         gCopyRedirect.disabled = false;
       }
       if (d && d.microsoftRedirectUri) document.getElementById("ms-redirect-uri").value = d.microsoftRedirectUri;
+      if (d && d.larkRedirectUri) larkRedirectInput.value = d.larkRedirectUri;
       var c = d && d.connectors;
       if (!c) return;
-      ["google", "microsoft"].forEach(function (id) {
+      ["lark", "google", "microsoft"].forEach(function (id) {
         var state = oauthUi[id], cfg = c[id] || {};
-        state.configured = !!cfg.configured;
+        state.configured = id === "lark" ? !!cfg.oauthConfigured : !!cfg.configured;
+        state.managed = !!cfg.managed;
         state.resultAt = cfg.authResult ? cfg.authResult.at : 0;
-        state.connect.textContent = (cfg.authorized ? "重新连接 " : "连接 ") + (id === "google" ? "Google" : "Microsoft");
+        state.connect.textContent = (cfg.authorized ? "重新连接 " : "连接 ") + state.name;
         if (!state.waiting) {
-          state.connect.disabled = !cfg.configured;
+          state.connect.disabled = !state.configured;
           state.out.className = "pc-test " + (cfg.authorized ? "ok" : "");
-          state.out.textContent = cfg.authorized ? ("已连接" + (cfg.email ? " · " + cfg.email : "")) : (cfg.configured ? "选择账户并授权即可连接" : "等待应用维护者完成一次性配置，配置后即可直接登录授权");
+          var account = cfg.accountName || cfg.email;
+          state.out.textContent = cfg.authorized ? ("已连接" + (account ? " · " + account : "")) : (state.configured ? "选择账户并授权即可连接" : (id === "lark" && cfg.region === "larksuite" ? "账户授权目前支持飞书国内版，国际 Lark 可使用高级设置中的机器人模式" : "等待应用维护者完成一次性配置，配置后即可直接登录授权"));
         }
         state.disconnect.hidden = !cfg.authorized;
-        state.setup.hidden = cfg.configured;
-        var clientInput = document.getElementById(id === "google" ? "g-clientid" : "ms-clientid");
-        if (document.activeElement !== clientInput && (!clientInput.value || cfg.managed)) clientInput.value = cfg.clientId || "";
-        state.advanced.querySelectorAll("input:not([readonly])").forEach(function (input) { input.disabled = !!cfg.managed; });
-        state.advanced.querySelectorAll("button").forEach(function (button) { if (button.textContent === "保存") button.disabled = !!cfg.managed; });
+        state.setup.hidden = state.configured;
+        var clientInput = document.getElementById(id === "lark" ? "lark-appid" : id === "google" ? "g-clientid" : "ms-clientid");
+        if (document.activeElement !== clientInput && (!clientInput.value || cfg.managed)) clientInput.value = (id === "lark" ? cfg.appId : cfg.clientId) || "";
+        if (id === "lark") {
+          [["lark-mode",cfg.mode || "oauth"],["lark-region",cfg.region || "feishu"],["lark-scopes",cfg.oauthScopes || ""],["lark-chatid",cfg.defaultChatId || ""]].forEach(function (field) {
+            var input = document.getElementById(field[0]);
+            if (document.activeElement !== input && (!input.value || input.value === state.fieldValues[field[0]] || (cfg.managed && (field[0] === "lark-region" || field[0] === "lark-scopes")))) input.value = field[1];
+            state.fieldValues[field[0]] = field[1];
+          });
+          ["lark-appid","lark-appsecret","lark-region","lark-scopes"].forEach(function (key) { document.getElementById(key).disabled = !!cfg.managed; });
+        } else {
+          state.advanced.querySelectorAll("input:not([readonly])").forEach(function (input) { input.disabled = !!cfg.managed; });
+          state.advanced.querySelectorAll("button").forEach(function (button) { if (button.textContent === "保存") button.disabled = !!cfg.managed; });
+        }
       });
       var lc = document.getElementById("conn-lark-chip");
       var gc = document.getElementById("conn-google-chip");
-      if (lc) lc.innerHTML = connChip(c.lark && c.lark.configured, (c.lark && c.lark.configured) ? ("已配置 · " + ((c.lark.mode === "webhook") ? "群机器人" : "应用")) : "未配置");
+      if (lc) lc.innerHTML = connChip(c.lark && (c.lark.authorized || (c.lark.mode !== "oauth" && c.lark.configured)), c.lark && c.lark.authorized ? ("已连接 · " + (c.lark.accountName || "飞书账户")) : (c.lark && c.lark.configured ? (c.lark.mode === "webhook" ? "已配置 · 群机器人" : c.lark.mode === "app" ? "已配置 · 应用机器人" : "待连接") : "应用待配置"));
       if (gc) gc.innerHTML = connChip(c.google && c.google.authorized, (c.google && c.google.authorized) ? ("已授权" + (c.google.email ? " · " + c.google.email : "")) : (c.google && c.google.configured ? "待连接" : "应用待配置"));
       var mc = document.getElementById("conn-mail-chip");
       var sc = document.getElementById("conn-ms-chip");

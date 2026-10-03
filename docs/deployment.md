@@ -20,13 +20,19 @@ node server.js
 
 ## OAuth 应用配置（一次）
 
-应用维护者先在 Google / Microsoft 注册 Lumi 的 OAuth 应用，设置服务端应用凭据；使用者随后只需点击“连接”，在官方页面登录并同意授权。仓库未内置已注册的 OAuth 应用。独立自托管实例可在设置 → 应用连接 → 高级设置中配置自己的应用，或使用下面的环境变量；环境配置优先，页面中的凭据输入会锁定。直接运行 Node 时需由启动器或系统服务注入环境变量；Compose 会读取 `.env`。
+应用维护者先在飞书 / Google / Microsoft 注册 Lumi 的 OAuth 应用，设置服务端应用凭据；使用者随后只需点击“连接”，在官方页面登录并同意授权。仓库未内置已注册的 OAuth 应用。独立自托管实例可在设置 → 应用连接 → 高级设置中配置自己的应用，或使用下面的环境变量；环境配置优先，页面中的凭据输入会锁定。直接运行 Node 时需由启动器或系统服务注入环境变量；Compose 会读取 `.env`。
+
+飞书：在 [开发者后台](https://open.feishu.cn/app) 创建 Lumi 应用，设置 `LUMEN_LARK_APP_ID` / `LUMEN_LARK_APP_SECRET`；或在高级设置填写，模式用 `oauth`。将设置页的完整回调 URI 加入「安全设置 → 重定向 URL」，默认 `http://localhost:8787/connectors/lark/callback`，端口使用实际服务端口。开通**用户身份**权限 `offline_access`、`im:message`、`im:message.send_as_user`、`docx:document`、`calendar:calendar`、`calendar:calendar:read`，启用刷新 `user_access_token`，发布并配置应用可用范围。`LUMEN_LARK_SCOPES` 可覆盖业务 scopes，`offline_access` 总会加入；使用减少后的范围时，未授权的业务操作将由飞书拒绝。授权使用随机 state、PKCE S256 和最新 OAuth v3 token 接口；消息、文档与日历以授权用户身份调用，日程明确写入可写的账户主日历，续期保存一次性的新版 refresh token，并发续期合并一次请求。断开连接也会阻止正在换令牌或续期的请求恢复旧账户。[授权码说明](https://open.feishu.cn/document/authentication-management/access-token/obtain-oauth-code.md)、[OAuth v3 令牌说明](https://open.feishu.cn/document/uAjLw4CM/ukTMukTMukTM/authentication-management/access-token/get-user-access-token-v3.md)、[主日历说明](https://open.feishu.cn/document/server-docs/calendar-v4/calendar/primary.md)
+
+飞书公开接入有应用分发限制：**企业自建应用仅供同一企业使用**；供其他企业安装需商店应用资质和发布。开放平台注册的应用均为 Confidential Client，需要 App Secret；Public Client 未开放注册。因此可以由维护者的受控后端配置一次后供该实例使用者授权，不能把 Secret 打包到公开桌面客户端或 GitHub。面向任意企业的完整服务还需商店应用及多用户后端，当前个人服务没有这些基础设施。[飞书平台说明](https://open.feishu.cn/llms.txt)
+
+账户授权目前支持飞书国内版。国际 Lark 继续支持原有 `app` 应用机器人与 `webhook` 群机器人模式；应用模式以机器人身份操作，Webhook 仅发群消息。这些配置保留在高级设置，与用户账户授权分开显示。
 
 Google：创建 **Web application**，设置 `LUMEN_GOOGLE_CLIENT_ID` 和 `LUMEN_GOOGLE_CLIENT_SECRET`，启用 Gmail、Google Calendar API，完成品牌、受众与测试用户配置。登记设置页显示的完整回调 URI，默认 `http://localhost:8787/connectors/google/callback`，端口使用实际服务端口。公开提供给其他用户时需满足 Google 对相关 scopes 的发布和验证要求。[Google OAuth 文档](https://developers.google.com/identity/protocols/oauth2/web-server)
 
 Microsoft：当前支持个人 Microsoft 账户。注册支持该受众的应用，并设置 `LUMEN_MICROSOFT_CLIENT_ID`。本机使用 **Mobile and desktop applications** 平台，登记完整 `http://localhost:8787/connectors/microsoft/callback`（按实际端口），Secret 留空；流程使用授权码 + PKCE。云端使用 **Web** 平台、HTTPS 回调，并设置 `LUMEN_MICROSOFT_CLIENT_SECRET` 为创建密钥时的 **Value**。设备码备用流程还需启用 Allow public client flows；它无需回调 URI。[Microsoft 授权码文档](https://learn.microsoft.com/en-us/entra/identity-platform/v2-oauth2-auth-code-flow)
 
-云端两种连接都需设置 `LUMEN_PUBLIC_URL=https://你的域名`，回调分别位于 `/connectors/google/callback` 与 `/connectors/microsoft/callback`。默认本机回调为 localhost。授权 state 随机、10 分钟有效、绑定提供商与应用、只能消费一次；PKCE 的 verifier 仅存服务端。有效回调不依赖跨站 Cookie。成功后 Lumi 自动更新账户，取消或失败会显示结果。重新连接失败不会移除已有有效账户，断开连接会使待完成授权失效。
+云端连接需设置 `LUMEN_PUBLIC_URL=https://你的域名`，回调位于 `/connectors/lark/callback`、`/connectors/google/callback` 与 `/connectors/microsoft/callback`。默认本机回调为 localhost。授权 state 随机、10 分钟有效、绑定提供商与应用、只能消费一次；PKCE 的 verifier 仅存服务端。有效回调不依赖跨站 Cookie。成功后 Lumi 自动更新账户，取消或失败会显示结果。重新连接失败不会移除已有有效账户，断开连接会使待完成授权失效。
 
 应用 Secret 与账户令牌不由状态 API 回传，也不进入模型上下文。环境变量中的应用 Secret 不复制到数据文件；账户令牌仍保存在私有数据目录的 0600 连接器文件中。更换应用 ID 后旧账户授权失效，需重新连接；这些能力仍按个人实例设计，未提供多用户账户隔离。
 
@@ -63,7 +69,9 @@ docker compose up -d --build
 | `LUMEN_MODEL_NAME` | 文本/视觉模型名称 |
 | `LUMEN_MODEL_API_KEY` | 自己的模型 Key |
 | `LUMEN_IMAGE_MODEL` | Images API 的图像模型名称 |
-| `LUMEN_PUBLIC_URL` | Google / Microsoft OAuth 回调所用的公开 HTTPS 源 |
+| `LUMEN_PUBLIC_URL` | 飞书 / Google / Microsoft OAuth 回调所用的公开 HTTPS 源 |
+| `LUMEN_LARK_APP_ID` / `LUMEN_LARK_APP_SECRET` | 飞书应用凭据，Secret 仅放在受控服务端 |
+| `LUMEN_LARK_REGION` / `LUMEN_LARK_SCOPES` | 默认 feishu；可选用户授权范围，始终包含 offline_access |
 | `LUMEN_GOOGLE_CLIENT_ID` / `LUMEN_GOOGLE_CLIENT_SECRET` | 维护者注册的 Google Web 应用凭据 |
 | `LUMEN_MICROSOFT_CLIENT_ID` / `LUMEN_MICROSOFT_CLIENT_SECRET` | Microsoft 应用 ID；Web 应用需 Secret，本机公共客户端留空 |
 | `LUMEN_VM_SHELL=0` | 禁用旧宿主软沙箱终端 |

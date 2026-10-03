@@ -76,9 +76,9 @@ docker build -t lumen-box vm-box/
 
 连接器可配置 IMAP/SMTP、Google、Microsoft Graph、飞书及已有应用路径。在活动 → 应用权限明确启用、授予读取或写入，默认禁用，服务端检查实际调用；邮件统一入口使用 Google/微软时还检查实际账号的权限。邮件、日历、文档动作取决于实际账号、OAuth scopes 与应用授权；不能把一个开关视为已连接。
 
-设置 → 应用连接中，使用者点击“连接 Google / Microsoft”进入官方登录、授权，返回后自动显示账户。Client ID 配置收进默认折叠的“高级设置”，由应用维护者完成一次；可从环境变量提供应用凭据，无需每个使用者填应用 ID。尚未配置应用时明确显示“应用待配置”，不伪装成可用的一键连接。
+设置 → 应用连接中，使用者点击“连接飞书账户 / Google / Microsoft”进入官方登录、授权，返回后自动显示账户。App ID / Client ID 配置收进默认折叠的“高级设置”，由应用维护者完成一次；可从环境变量提供应用凭据，无需每个使用者填应用 ID。尚未配置应用时明确显示“应用待配置”。飞书支持 OAuth v3 + PKCE、令牌续期、断开连接，用户授权后的消息、文档及日历动作使用用户身份；原有应用机器人与群 Webhook 保留。
 
-维护者配置方法见 [OAuth 应用配置](docs/deployment.md#oauth-应用配置一次)。Google 使用 Web 应用；Microsoft 本机可用公共客户端 + PKCE，云端使用 Web 应用与服务端 Secret。设备码保留为微软的高级备用入口。仓库不包含任何已注册的公共 OAuth 应用，也不复用其他产品的 Client ID。
+维护者配置方法见 [OAuth 应用配置](docs/deployment.md#oauth-应用配置一次)。飞书账户授权目前支持国内版，自建应用限本企业，跨企业需商店应用；开放平台注册的应用需要服务端 Secret，不能分发到公开客户端。Google 使用 Web 应用；Microsoft 本机可用公共客户端 + PKCE，云端使用 Web 应用与服务端 Secret。设备码保留为微软的高级备用入口。仓库不包含任何已注册的公共 OAuth 应用，也不复用其他产品的 Client ID。
 
 收件箱新增完整 IMAP/Gmail/Graph 入口，支持未读筛选、中文 MIME 和 IMAP literal 分包。后台读取过滤明显验证码/重置密码邮件主题；这不是完整正文敏感信息分类。
 

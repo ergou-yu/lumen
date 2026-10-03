@@ -2033,6 +2033,8 @@ const backgroundModel = createModel(DATA_DIR);
 const internalAgentToken = crypto.randomBytes(32).toString("hex");
 const accessToken = process.env.LUMEN_ACCESS_TOKEN || "";
 const oauthStates = new Map();
+// 飞书 refresh_token 只能用一次；并发请求共享一次续期。
+const larkRefreshes = new Map();
 const sessionToken = accessToken ? crypto.createHmac("sha256", accessToken).update("lumen-session").digest("hex") : "";
 function sameToken(a, b) {
   const x = Buffer.from(String(a || "")), y = Buffer.from(String(b || ""));
@@ -2135,7 +2137,7 @@ const server = http.createServer(async function (req, res) {
     } catch (_) { return json(res, 400, { ok: false, error: "请求体非法" }); }
   }
   const internal = sameToken(req.headers["x-lumen-internal"], internalAgentToken);
-  const callbackProvider = p.match(/^\/connectors\/(google|microsoft)\/callback$/)?.[1];
+  const callbackProvider = p.match(/^\/connectors\/(google|microsoft|lark)\/callback$/)?.[1];
   const callbackState = oauthStates.get(u.searchParams.get("state"));
   const oauthCallback = req.method === "GET" && callbackProvider && callbackState?.provider === callbackProvider && callbackState.expires > Date.now();
   if (accessToken && !internal && !oauthCallback && !sameToken(req.headers.authorization, "Bearer " + accessToken) &&
@@ -2518,12 +2520,24 @@ const server = http.createServer(async function (req, res) {
       if (previousId && previousId !== cfg.clientId) clearConnectorAuth(cfg);
       if (cfg.refreshToken) cfg._oauthClientId = cfg.clientId;
     }
+    const lark = connectors.lark = connectors.lark || {};
+    const previousId = lark._oauthClientId || lark.appId;
+    const previousRegion = lark._oauthRegion || lark.region || "feishu";
+    if (process.env.LUMEN_LARK_APP_ID) {
+      lark.appId = process.env.LUMEN_LARK_APP_ID;
+      lark.appSecret = process.env.LUMEN_LARK_APP_SECRET || "";
+      lark.region = process.env.LUMEN_LARK_REGION === "larksuite" ? "larksuite" : "feishu";
+      lark.oauthScopes = process.env.LUMEN_LARK_SCOPES || "";
+    }
+    if (previousId && (previousId !== lark.appId || previousRegion !== (lark.region || "feishu"))) clearConnectorAuth(lark);
+    if (lark.refreshToken) { lark._oauthClientId = lark.appId; lark._oauthRegion = lark.region || "feishu"; }
   }
   function clearConnectorAuth(cfg) {
-    for (const key of ["refreshToken","_accessToken","_tokenExp","email","_deviceCode","_deviceExp","_oauthClientId","authResult"]) delete cfg[key];
+    for (const key of ["refreshToken","_accessToken","_tokenExp","_refreshExp","email","accountName","openId","grantedScopes","_deviceCode","_deviceExp","_oauthClientId","_oauthRegion","authResult"]) delete cfg[key];
     cfg._authRevision = crypto.randomBytes(16).toString("hex");
   }
   function managedOAuth(id) {
+    if (id === "lark") return !!process.env.LUMEN_LARK_APP_ID;
     return !!process.env[(id === "google" ? "LUMEN_GOOGLE" : "LUMEN_MICROSOFT") + "_CLIENT_ID"];
   }
   function connectorsSave() {
@@ -2532,6 +2546,7 @@ const server = http.createServer(async function (req, res) {
       for (const id of ["google","microsoft"]) if (managedOAuth(id)) {
         delete stored[id].clientId; delete stored[id].clientSecret;
       }
+      if (managedOAuth("lark")) for (const key of ["appId","appSecret","region","oauthScopes"]) delete stored.lark[key];
       fs.writeFileSync(CONNECTORS_FILE, JSON.stringify(stored, null, 2), { mode: 0o600 });
       fs.chmodSync(CONNECTORS_FILE, 0o600);
     } catch (e) { console.warn("应用连接配置保存失败：", e.message); }
@@ -2545,7 +2560,13 @@ const server = http.createServer(async function (req, res) {
       lark: {
         permissions: lark.permissions || { on:false,read:false,write:false },
         configured: !!(lark.mode === "webhook" ? lark.webhook : (lark.appId && lark.appSecret)),
-        mode: lark.mode || "app",
+        oauthConfigured: !!(lark.appId && lark.appSecret && (lark.region || "feishu") === "feishu"),
+        authorized: !!lark.refreshToken && (!lark._refreshExp || lark._refreshExp > Date.now()),
+        accountName: lark.accountName || "",
+        managed: managedOAuth("lark"),
+        authResult: lark.authResult || null,
+        oauthScopes: larkScopes(lark),
+        mode: lark.mode || "oauth",
         region: lark.region || "feishu",
         appId: lark.appId || "",
         defaultChatId: lark.defaultChatId || "",
@@ -2581,6 +2602,76 @@ const server = http.createServer(async function (req, res) {
 
   // —— 飞书 / Lark OpenAPI ——
   const LARK_HOSTS = { feishu: "https://open.feishu.cn", larksuite: "https://open.larksuite.com" };
+  const LARK_SCOPES = "offline_access im:message im:message.send_as_user docx:document calendar:calendar calendar:calendar:read";
+  function larkScopes(cfg) {
+    return [...new Set(("offline_access " + (cfg.oauthScopes || LARK_SCOPES)).trim().split(/\s+/))].join(" ");
+  }
+  function larkAuthUrl(cfg) {
+    return "https://accounts.feishu.cn/open-apis/authen/v1/authorize?" + new URLSearchParams(Object.assign(oauthStart("lark", cfg), {
+      client_id: cfg.appId, response_type: "code", scope: larkScopes(cfg), prompt: "consent",
+    })).toString();
+  }
+  async function larkOAuthToken(cfg, params) {
+    const response = await fetch("https://accounts.feishu.cn/oauth/v3/token", {
+      method: "POST", headers: { "Content-Type": "application/x-www-form-urlencoded" },
+      body: new URLSearchParams(Object.assign({ client_id: cfg.appId, client_secret: cfg.appSecret }, params)),
+      signal: AbortSignal.timeout(15000),
+    });
+    const data = await response.json();
+    if (!response.ok || data.code !== 0 || data.error) {
+      const error = new Error("飞书授权失败（" + (Number(data.code) || response.status) + "）：请检查应用权限、可用范围及刷新令牌设置，必要时重新连接");
+      error.authExpired = [20026,20037,20064,20073].includes(data.code);
+      throw error;
+    }
+    if (!data.access_token || !data.refresh_token || !(data.expires_in > 0) || !(data.refresh_token_expires_in > 0)) throw new Error("飞书未返回完整持久授权，请开通 offline_access 和刷新令牌后重新连接");
+    return data;
+  }
+  function larkStoreTokens(cfg, token) {
+    cfg.refreshToken = token.refresh_token;
+    cfg._accessToken = token.access_token;
+    cfg._tokenExp = Date.now() + token.expires_in * 1000;
+    cfg._refreshExp = Date.now() + token.refresh_token_expires_in * 1000;
+    cfg.grantedScopes = token.scope || "";
+    cfg._oauthClientId = cfg.appId;
+    cfg._oauthRegion = cfg.region || "feishu";
+  }
+  async function larkUserToken(cfg) {
+    if (!cfg.refreshToken || (cfg._refreshExp && cfg._refreshExp <= Date.now())) throw new Error("飞书账户未连接或授权已过期：设置 → 应用连接 → 连接飞书账户");
+    if (cfg._accessToken && Date.now() < (cfg._tokenExp || 0) - 60000) return cfg._accessToken;
+    const revision = cfg._authRevision || "", refresh = cfg.refreshToken;
+    const key = crypto.createHash("sha256").update(cfg.appId + ":" + revision + ":" + refresh).digest("hex");
+    let renewal = larkRefreshes.get(key);
+    if (!renewal) {
+      renewal = larkOAuthToken(cfg, { grant_type: "refresh_token", refresh_token: refresh });
+      larkRefreshes.set(key, renewal);
+    }
+    try {
+      const token = await renewal;
+      connectorsLoad();
+      const current = connectors.lark;
+      if (current.appId !== cfg.appId || (current._authRevision || "") !== revision || (current.region || "feishu") !== (cfg.region || "feishu") || ![refresh, token.refresh_token].includes(current.refreshToken)) throw new Error("飞书连接已更改，请重新执行操作");
+      // 同一续期结果可由多个等待者保存；保留期间发生的权限修改。
+      larkStoreTokens(current, token);
+      connectorsSave();
+      return token.access_token;
+    } catch (error) {
+      if (error.authExpired) {
+        connectorsLoad();
+        const current = connectors.lark;
+        if (current.appId === cfg.appId && (current._authRevision || "") === revision && current.refreshToken === refresh) {
+          clearConnectorAuth(current); invalidateOAuth("lark");
+          current.authResult = { ok:false, at:Date.now(), message:"飞书授权已失效，请重新连接" };
+          connectorsSave();
+        }
+      }
+      throw error;
+    } finally {
+      if (larkRefreshes.get(key) === renewal) larkRefreshes.delete(key);
+    }
+  }
+  async function larkActionToken(cfg) {
+    return (cfg.mode || "oauth") === "oauth" ? larkUserToken(cfg) : larkTenantToken(cfg);
+  }
   let larkTokenCache = { token: "", exp: 0 };
   async function larkTenantToken(cfg) {
     if (larkTokenCache.token && Date.now() < larkTokenCache.exp - 60000) return larkTokenCache.token;
@@ -2596,7 +2687,7 @@ const server = http.createServer(async function (req, res) {
   async function larkSend(cfg, args) {
     const text = String(args.text || "");
     if (!text) throw new Error("消息内容为空");
-    if ((cfg.mode === "webhook" || !cfg.appId) && cfg.webhook) {
+    if (cfg.mode === "webhook" && cfg.webhook) {
       const r = await fetch(cfg.webhook, {
         method: "POST", headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ msg_type: "text", content: { text: text } }),
@@ -2610,18 +2701,18 @@ const server = http.createServer(async function (req, res) {
     if (!target) throw new Error("未指定接收者：在 设置 → 应用连接 填默认群 chat_id（oc 开头），或在指令里给出 open_id/chat_id");
     const ridType = target.indexOf("oc") === 0 ? "chat_id" : target.indexOf("ou") === 0 ? "open_id"
       : target.indexOf("@") > 0 ? "email" : "chat_id";
-    const token = await larkTenantToken(cfg);
+    const token = await larkActionToken(cfg);
     const host = LARK_HOSTS[cfg.region] || LARK_HOSTS.feishu;
     const r = await fetch(host + "/open-apis/im/v1/messages?receive_id_type=" + ridType, {
       method: "POST",
       headers: { "Content-Type": "application/json", Authorization: "Bearer " + token },
       body: JSON.stringify({ receive_id: target, msg_type: "text", content: JSON.stringify({ text: text }) }),
     }).then(function (x) { return x.json(); });
-    if (r.code !== 0) throw new Error("飞书发送失败：" + (r.msg || r.code) + "（机器人需在群里/有 im 权限）");
-    return { channel: "app", messageId: r.data && r.data.message_id };
+    if (r.code !== 0) throw new Error("飞书发送失败：" + (r.msg || r.code) + ((cfg.mode || "oauth") === "oauth" ? "（检查用户消息权限及接收者）" : "（机器人需在群里/有 im 权限）"));
+    return { channel: (cfg.mode || "oauth") === "oauth" ? "user" : "app", messageId: r.data && r.data.message_id };
   }
   async function larkDoc(cfg, args) {
-    const token = await larkTenantToken(cfg);
+    const token = await larkActionToken(cfg);
     const host = LARK_HOSTS[cfg.region] || LARK_HOSTS.feishu;
     const title = String(args.title || "Lumi 笔记 · " + new Date().toISOString().slice(0, 10));
     const doc = await fetch(host + "/open-apis/docx/v1/documents", {
@@ -2649,24 +2740,28 @@ const server = http.createServer(async function (req, res) {
     return { documentId: docId, url: web + docId, note: blockErr };
   }
   async function larkEvent(cfg, args) {
-    const token = await larkTenantToken(cfg);
+    const start = Date.parse(args.startISO), end = Date.parse(args.endISO);
+    if (!Number.isFinite(start) || !Number.isFinite(end) || end <= start) throw new Error("日程时间非法：需要有效的 startISO / endISO，且结束晚于开始");
+    const token = await larkActionToken(cfg);
     const host = LARK_HOSTS[cfg.region] || LARK_HOSTS.feishu;
-    const cl = await fetch(host + "/open-apis/calendar/v4/calendars", {
+    const userMode = (cfg.mode || "oauth") === "oauth";
+    const cl = await fetch(host + "/open-apis/calendar/v4/calendars" + (userMode ? "/primary" : ""), {
+      method: userMode ? "POST" : "GET",
       headers: { Authorization: "Bearer " + token },
     }).then(function (x) { return x.json(); });
-    if (cl.code !== 0) throw new Error("飞书日历读取失败：" + (cl.msg || cl.code) + "（应用需开通日历权限）");
-    const list = (cl.data && cl.data.calendar_list) || [];
-    const cal = list.filter(function (c) { return c.is_primary; })[0] || list[0];
-    if (!cal) throw new Error("没有可用日历");
-    const ts = function (iso) { return String(Math.floor(new Date(iso).getTime() / 1000)); };
+    if (cl.code !== 0) throw new Error("飞书日历读取失败：" + (cl.msg || cl.code) + "（检查当前身份的日历权限）");
+    const list = userMode ? ((cl.data && cl.data.calendars) || []).map(c => c.calendar) : ((cl.data && cl.data.calendar_list) || []);
+    const writable = c => c && !c.is_deleted && !c.is_third_party && ["owner","writer"].includes(c.role);
+    const cal = list.find(c => writable(c) && c.type === "primary") || (!userMode && list.find(c => writable(c) && c.type === "shared"));
+    if (!cal?.calendar_id) throw new Error(userMode ? "没有可写的账户主日历，请检查用户日历权限" : "没有可写的应用日历");
     const ev = await fetch(host + "/open-apis/calendar/v4/calendars/" + cal.calendar_id + "/events", {
       method: "POST",
       headers: { "Content-Type": "application/json", Authorization: "Bearer " + token },
       body: JSON.stringify({
         summary: String(args.summary || "日程").slice(0, 100),
         description: String(args.description || "").slice(0, 500),
-        start: { timestamp: ts(args.startISO) },
-        end: { timestamp: ts(args.endISO) },
+        start: { timestamp: String(Math.floor(start / 1000)) },
+        end: { timestamp: String(Math.floor(end / 1000)) },
       }),
     }).then(function (x) { return x.json(); });
     if (ev.code !== 0) throw new Error("飞书日程创建失败：" + (ev.msg || ev.code));
@@ -2685,8 +2780,14 @@ const server = http.createServer(async function (req, res) {
     const state = crypto.randomBytes(32).toString("hex");
     const verifier = crypto.randomBytes(32).toString("base64url");
     const redirect = oauthRedirectUri(provider);
-    oauthStates.set(state, { provider, expires:Date.now()+600000, redirect, clientId:cfg.clientId, revision:cfg._authRevision || "", verifier });
+    oauthStates.set(state, { provider, expires:Date.now()+600000, redirect, clientId:oauthClientId(provider,cfg), revision:cfg._authRevision || "", verifier,
+      region:provider === "lark" ? (cfg.region || "feishu") : "", scopes:provider === "lark" ? larkScopes(cfg) : "" });
     return { state, redirect_uri:redirect, code_challenge:crypto.createHash("sha256").update(verifier).digest("base64url"), code_challenge_method:"S256" };
+  }
+  function oauthClientId(provider, cfg) { return provider === "lark" ? cfg?.appId : cfg?.clientId; }
+  function oauthMatches(provider, cfg, pending) {
+    return cfg && pending.clientId === oauthClientId(provider,cfg) && pending.revision === (cfg._authRevision || "") &&
+      (provider !== "lark" || (pending.region === (cfg.region || "feishu") && pending.scopes === larkScopes(cfg)));
   }
   function invalidateOAuth(provider) {
     for (const [state,pending] of oauthStates) if (pending.provider === provider) oauthStates.delete(state);
@@ -3055,21 +3156,24 @@ const server = http.createServer(async function (req, res) {
         ok: true, connectors: pub,
         googleRedirectUri: googleRedirectUri(),
         microsoftRedirectUri: oauthRedirectUri("microsoft"),
+        larkRedirectUri: oauthRedirectUri("lark"),
       });
     }
-    if (req.method === "GET" && /^\/connectors\/(google|microsoft)\/auth$/.test(p)) {
+    if (req.method === "GET" && /^\/connectors\/(google|microsoft|lark)\/auth$/.test(p)) {
       const provider = p.split("/")[2], cfg = connectors[provider] || {};
-      if (!cfg.clientId || (provider === "google" && !cfg.clientSecret)) {
-        return oauthPage(provider === "google" ? "Google" : "Microsoft", false, "Lumi 的应用维护者尚未完成一次性应用配置，请在高级设置中配置后重试。");
+      const name = provider === "lark" ? "飞书" : provider === "google" ? "Google" : "Microsoft";
+      if (provider === "lark" && (cfg.region || "feishu") !== "feishu") return oauthPage(name, false, "账户授权目前支持飞书国内版；国际 Lark 可在高级设置使用应用机器人或 Webhook。");
+      if (!oauthClientId(provider,cfg) || ((provider === "google" || provider === "lark") && !(provider === "lark" ? cfg.appSecret : cfg.clientSecret))) {
+        return oauthPage(name, false, "Lumi 的应用维护者尚未完成一次性应用配置，请在高级设置中配置后重试。");
       }
-      res.writeHead(302, { Location:provider === "google" ? googleAuthUrl(cfg) : msAuthUrl(cfg), "Cache-Control":"no-store", "Referrer-Policy":"no-referrer" });
+      res.writeHead(302, { Location:provider === "lark" ? larkAuthUrl(cfg) : provider === "google" ? googleAuthUrl(cfg) : msAuthUrl(cfg), "Cache-Control":"no-store", "Referrer-Policy":"no-referrer" });
       return res.end();
     }
     if (req.method === "GET" && callbackProvider) {
-      const q = u.searchParams, provider = callbackProvider, name = provider === "google" ? "Google" : "Microsoft";
+      const q = u.searchParams, provider = callbackProvider, name = provider === "lark" ? "飞书" : provider === "google" ? "Google" : "Microsoft";
       const pending = oauthStates.get(q.get("state"));
       oauthStates.delete(q.get("state"));
-      if (!pending || pending.provider !== provider || pending.expires <= Date.now() || pending.clientId !== connectors[provider]?.clientId || pending.revision !== (connectors[provider]?._authRevision || "")) return json(res,403,{ok:false,error:"授权 state 失效，请重新连接"});
+      if (!pending || pending.provider !== provider || pending.expires <= Date.now() || !oauthMatches(provider,connectors[provider],pending)) return json(res,403,{ok:false,error:"授权 state 失效，请重新连接"});
       const code = q.get("code");
       if (q.has("error") || !code) {
         connectors[provider].authResult = {ok:false, at:Date.now(), message:"授权已取消或未完成，可重新连接"};
@@ -3078,27 +3182,34 @@ const server = http.createServer(async function (req, res) {
       }
       try {
         const params = { code, grant_type:"authorization_code", redirect_uri:pending.redirect, code_verifier:pending.verifier };
-        const tk = provider === "google" ? await googleToken(connectors.google,params) : await msToken(params);
+        const tk = provider === "lark" ? await larkOAuthToken(connectors.lark,params) : provider === "google" ? await googleToken(connectors.google,params) : await msToken(params);
         if (!tk.access_token || !tk.refresh_token) throw new Error("未收到完整的持久授权，请重新连接并同意授权");
-        const prof = await fetch(provider === "google" ? "https://www.googleapis.com/oauth2/v2/userinfo" : "https://graph.microsoft.com/v1.0/me", {
+        const prof = await fetch(provider === "lark" ? "https://open.feishu.cn/open-apis/authen/v1/user_info" : provider === "google" ? "https://www.googleapis.com/oauth2/v2/userinfo" : "https://graph.microsoft.com/v1.0/me", {
           headers:{ Authorization:"Bearer "+tk.access_token }, signal:AbortSignal.timeout(15000),
         }).then(r=>r.json()).catch(()=>({}));
         // 换令牌期间可能修改了应用或权限；重新加载后只更新此账户的授权字段。
         connectorsLoad();
         const cfg = connectors[provider];
-        if (cfg.clientId !== pending.clientId || pending.revision !== (cfg._authRevision || "")) throw new Error("应用配置或授权已更改，请重新连接");
+        if (!oauthMatches(provider,cfg,pending)) throw new Error("应用配置或授权已更改，请重新连接");
+        if (provider === "lark" && (prof.code !== 0 || !prof.data?.open_id)) throw new Error("未能确认飞书账户身份，请重新连接");
         cfg.refreshToken = tk.refresh_token;
         cfg._accessToken = tk.access_token;
         cfg._tokenExp = Date.now()+(tk.expires_in || 3600)*1000;
-        cfg._oauthClientId = cfg.clientId;
+        cfg._oauthClientId = oauthClientId(provider,cfg);
         cfg.email = (provider === "google" ? prof.email : (prof.mail || prof.userPrincipalName)) || "";
+        if (provider === "lark") {
+          larkStoreTokens(cfg,tk);
+          cfg.mode = "oauth";
+          cfg.accountName = String(prof.data.name || prof.data.en_name || "飞书用户").slice(0,100);
+          cfg.openId = prof.data.open_id;
+        }
         cfg.authResult = {ok:true, at:Date.now(), message:name+" 已连接"};
         delete cfg._deviceCode; delete cfg._deviceExp;
         connectorsSave();
-        return oauthPage(name, true, "账户已连接"+(cfg.email ? "："+cfg.email : "")+"。Lumi 的连接状态会自动更新。");
+        return oauthPage(name, true, "账户已连接"+((cfg.accountName || cfg.email) ? "："+(cfg.accountName || cfg.email) : "")+"。Lumi 的连接状态会自动更新。");
       } catch (e) {
         connectorsLoad();
-        if (connectors[provider]?.clientId === pending.clientId && pending.revision === (connectors[provider]._authRevision || "")) {
+        if (oauthMatches(provider,connectors[provider],pending)) {
           connectors[provider].authResult = {ok:false, at:Date.now(), message:"连接失败，请检查应用配置后重新连接"};
           connectorsSave();
         }
@@ -3132,11 +3243,20 @@ const server = http.createServer(async function (req, res) {
       const patch = cbody.patch || {};
       if (id === "lark") {
         const cur = connectors.lark = connectors.lark || {};
-        ["mode", "region", "appId", "appSecret", "webhook", "defaultChatId"].forEach(function (k) {
-          if (typeof patch[k] === "string") cur[k] = patch[k].trim();
-        });
-        if (cur.mode !== "webhook") cur.mode = "app";
-        if (cur.region !== "larksuite") cur.region = "feishu";
+        if (managedOAuth(id) && ["appId","appSecret","region","oauthScopes"].some(k => typeof patch[k] === "string")) return json(res,400,{ok:false,error:"飞书应用由服务端环境配置，请由维护者修改环境变量"});
+        const nextId = typeof patch.appId === "string" ? patch.appId.trim() : cur.appId;
+        const nextRegion = typeof patch.region === "string" ? (patch.region === "larksuite" ? "larksuite" : "feishu") : (cur.region || "feishu");
+        const nextMode = typeof patch.mode === "string" ? patch.mode.trim() : (cur.mode || "oauth");
+        if (!["oauth","app","webhook"].includes(nextMode)) return json(res,400,{ok:false,error:"模式需为 oauth、app 或 webhook"});
+        const scopesChanged = typeof patch.oauthScopes === "string" && larkScopes({oauthScopes:patch.oauthScopes.trim()}) !== larkScopes(cur);
+        if (nextId !== cur.appId || nextRegion !== (cur.region || "feishu") || nextMode !== (cur.mode || "oauth") || scopesChanged || patch.clearAuth) {
+          clearConnectorAuth(cur); invalidateOAuth(id);
+          if (nextId !== cur.appId) delete cur.appSecret;
+        }
+        for (const key of ["appId","oauthScopes","webhook","defaultChatId"]) if (typeof patch[key] === "string") cur[key] = patch[key].trim();
+        // 保存其他字段时空密码框不覆盖已保存的 Secret。
+        if (typeof patch.appSecret === "string" && patch.appSecret.trim()) cur.appSecret = patch.appSecret.trim();
+        cur.mode = nextMode; cur.region = nextRegion;
         larkTokenCache = { token: "", exp: 0 };
       } else if (id === "google") {
         const cur = connectors.google = connectors.google || {};
@@ -3174,8 +3294,8 @@ const server = http.createServer(async function (req, res) {
             await larkSend(cfg, { text: "🌐 Lumen 连接测试 · " + new Date().toLocaleString("zh-CN") });
             return json(res, 200, { ok: true, msg: "✅ 已向群发送测试消息" });
           }
-          await larkTenantToken(cfg);
-          return json(res, 200, { ok: true, msg: "✅ 飞书鉴权成功（应用模式）" });
+          await larkActionToken(cfg);
+          return json(res, 200, { ok: true, msg: (cfg.mode || "oauth") === "oauth" ? "✅ 飞书账户连接有效" : "✅ 飞书鉴权成功（应用机器人模式）" });
         }
         if (id === "google") {
           const cfg = connectors.google || {};

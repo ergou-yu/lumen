@@ -1281,7 +1281,7 @@
           surfacedApproval = null;
         }
 
-        if (t.status === "done" || t.status === "failed" || t.status === "stopped") {
+        if (["done", "failed", "stopped", "waiting_user"].includes(t.status)) {
           resolve(t);
           return;
         }
@@ -1318,7 +1318,7 @@
         steps[2].label = "虚拟机桌面 —— 未执行";
         return;
       }
-      return desktopApi("/vm/desktop/tasks", "POST", { goal: text.slice(0, 280) }, task).then(function (t) {
+      return desktopApi("/vm/desktop/tasks", "POST", { goal: text.slice(0, 8000) }, task).then(function (t) {
         if (t && t.id) {
           taskId = t.id;
           steps[1].label = "向 Sentinel 登记任务 —— 已登记（任务号 " + t.id + " · 服务端执行，关页不中断）";
@@ -1350,6 +1350,7 @@
             }).join("\n\n")).slice(0, 9000);
         }
         ctx.desktopSummary = t.summary || "";
+        ctx.desktopStatus = t.status;
         ctx.desktopNote = t.noteFile || "";
       });
     }));
@@ -1369,7 +1370,7 @@
     // 步骤 5：收工
     chain = chain.then(phase(5, function () {
       ctx.computerSummary = ctx.desktopSummary
-        ? ("任务在桌面虚拟机上完成：" + ctx.desktopSummary +
+        ? ((ctx.desktopStatus === "done" ? "任务在桌面虚拟机上完成：" : ctx.desktopStatus === "waiting_user" ? "桌面任务等待本人操作：" : "桌面任务未完成：") + ctx.desktopSummary +
           (ctx.desktopNote ? "；笔记已存入 " + ctx.desktopNote : "") +
           "。全程未触碰用户本机；敏感动作经 Sentinel 审查。")
         : "桌面虚拟机任务未完成（虚拟机不可用或被停止）。";
@@ -1848,7 +1849,7 @@
         store.audit("任务中断", "用户中断", "info");
         finish("aborted");
       } else {
-        finish("done");
+        finish(ctx.desktopStatus === "waiting_user" ? "waiting" : ["failed", "stopped"].includes(ctx.desktopStatus) ? "failed" : "done");
       }
     }).catch(function (err) {
       if (err && err.message === "DENIED") {

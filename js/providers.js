@@ -33,7 +33,7 @@
       name: "Z.ai 智谱 GLM",
       type: "openai",
       baseUrl: "https://api.z.ai/api/paas/v4",
-      models: ["glm-5.3", "glm-5.2", "glm-5", "glm-4.7-flash"],
+      models: ["glm-5.3", "glm-5.3-flash", "glm-5.2", "glm-5", "glm-4.7-flash"],
     },
     localgw: {
       name: "本地网关（server.js）",

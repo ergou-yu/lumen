@@ -31,6 +31,11 @@ test("HTTP访问鉴权、同源、后台模型保密、关页完成和重启回�
   assert.equal((await fetch(base+"/connectors/google/callback?state="+oauthState)).status,200);
   assert.equal((await fetch(base+"/connectors/google/callback?state="+oauthState)).status,401);
   const cfg=await fetch(base+"/agent/model",{method:"POST",headers:auth,body:JSON.stringify({type:"openai",model:"fixture",baseUrl:"http://127.0.0.1:"+model.address().port,apiKey:"fixture-key"})});assert.equal(cfg.status,200);
+  const selectModel=(name,headers=auth)=>fetch(base+"/agent/model/select",{method:"POST",headers,body:JSON.stringify({model:name})});
+  assert.equal((await selectModel("fixture",{"Content-Type":"application/json"})).status,401);
+  assert.equal((await selectModel("fixture",{...auth,Origin:"https://evil.example"})).status,403);
+  assert.equal((await selectModel("not-configured")).status,400);
+  const selected=await(await selectModel("fixture")).json();assert.equal(selected.model,"fixture");assert.equal(JSON.stringify(selected).includes("fixture-key"),false);
   const state=await (await fetch(base+"/agent/state",{headers:auth})).json();assert.equal(JSON.stringify(state).includes("fixture-key"),false);
   const job=await (await fetch(base+"/agent/jobs",{method:"POST",headers:auth,body:JSON.stringify({prompt:"test",channel:"slack",channelTarget:"forged"})})).json();assert.equal(job.job.channel,"web");assert.equal(job.job.channelTarget,"");
   // 等待真实回执，避免机器忙碌时固定 1.4 秒把正常后台任务误判为失败。

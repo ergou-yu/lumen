@@ -8,6 +8,89 @@ function fixture(t, model, extra = {}) {
   const r = createRuntime(opts); t.after(() => { r.close(); fs.rmSync(dir,{recursive:true,force:true}); }); return { r,dir,workspace,opts };
 }
 const action = (op,args) => JSON.stringify({op,args});
+test("桌面委托保留完整条件，等待真实结果且不靠模型反复轮询", async t => {
+  const goal = "打开页面。".repeat(100) + "遇到登录必须停下由本人操作";
+  let calls = 0, submissions = 0;
+  const task = { id: "dt-test", status: "queued", summary: "", updatedAt: 1 };
+  const { r } = fixture(t, async (sys, msgs) => {
+    calls++;
+    if (calls === 1) return action("desktop", { goal });
+    assert.match(msgs.at(-1).content, /真实正文/);
+    return action("done", { text: "已读取真实正文" });
+  }, { desktop: async g => { submissions++; assert.equal(g, goal); return { taskId: task.id, status: task.status }; }, desktopTasks: () => [task] });
+  const j = r.create({ prompt: "read" }); r.tick(); await wait();
+  assert.equal(r.getJob(j.id).status, "waiting_desktop");
+  task.status = "waiting_approval"; task.updatedAt++; r.tick(); await wait();
+  assert.match(r.getJob(j.id).events.at(-1).detail, /审批具体动作/);
+  assert.equal(calls, 1); assert.equal(submissions, 1);
+  task.status = "done"; task.summary = "真实正文"; r.tick(); await wait();
+  assert.equal(r.getJob(j.id).status, "done"); assert.equal(submissions, 1);
+});
+test("桌面失败和需要本人操作不标为完成；activity可查桌面失败原因", async t => {
+  for (const status of ["failed", "waiting_user"]) await t.test(status, async t => {
+    let calls = 0;
+    const task = { id: "dt-test", status: "running", summary: "模型响应超时" };
+    const { r } = fixture(t, async () => ++calls === 1 ? action("desktop", { goal: "read" }) : calls === 2 ? action("activity", { taskId: task.id }) : action("done", { text: "当前执行结果" }),
+      { desktop: () => ({ taskId: task.id }), desktopTasks: () => [task] });
+    const j = r.create({ prompt: "read" }); r.tick(); await wait(); task.status = status; r.tick(); await wait();
+    assert.equal(r.getJob(j.id).status, status);
+    assert.match(r.getJob(j.id).result, /模型响应超时/);
+    assert.equal(calls, 1, "失败与本人操作直接回传，无需等待模型再次总结");
+  });
+});
+test("旧版提交即完成的记录按实际桌面失败状态修正并落盘", async t => {
+  const task = { id: "dt-old", status: "failed", summary: "旧版概括", steps: [{ kind: "error", label: "实际模型超时" }] };
+  const { r, opts } = fixture(t, async () => action("done", { text: "unused" }), { desktopTasks: () => [task] });
+  const j = r.create({ prompt: "original", conversationId: "original-chat" });
+  Object.assign(r.getJob(j.id), { status: "done", result: "任务已提交，排队中", desktopTaskIds: [task.id] }); r.save(); r.close();
+  const re = createRuntime(opts);
+  assert.equal(re.getJob(j.id).status, "failed"); assert.match(re.getJob(j.id).result, /实际模型超时/);
+  assert.doesNotMatch(re.getJob(j.id).result, /已提交，排队中/);
+  assert.equal(re.getJob(j.id).events.at(-1).kind, "reconciled");
+  re.close(); const again = createRuntime(opts); assert.equal(again.getJob(j.id).status, "failed"); again.close();
+});
+test("聊天中的继续直接接续原桌面任务；不新建、不同会话不接续", async t => {
+  const task = { id: "dt-resume", status: "failed", summary: "interrupted" };
+  let submissions = 0, calls = 0;
+  const { r } = fixture(t, async () => { calls++; return action("done", { text: "结果已核实" }); }, {
+    desktopTasks: () => [task],
+    desktop: async (goal, j, id) => { submissions++; assert.equal(goal, ""); assert.equal(id, task.id); task.status = "running"; return { taskId: id }; },
+  });
+  const old = r.create({ prompt: "先检查已有结果，再继续操作", conversationId: "chat" });
+  Object.assign(r.getJob(old.id), { status: "failed", desktopTaskIds: [task.id] });
+  const next = r.create({ prompt: "继续啊？", conversationId: "chat" }); r.tick(); await wait();
+  assert.equal(submissions, 1); assert.equal(calls, 0); assert.equal(r.getJob(next.id).status, "waiting_desktop");
+  assert.match(r.getJob(next.id).userInstruction, /检查已有结果/);
+  task.status = "done"; task.summary = "完成实际操作"; r.tick(); await wait();
+  assert.equal(r.getJob(next.id).status, "done"); assert.equal(submissions, 1);
+  const unrelated = r.create({ prompt: "继续", conversationId: "other-chat" });
+  assert.equal(r.getJob(unrelated.id).resumeDesktopTaskId, undefined);
+});
+test("等待桌面的检查点重启后继续跟进；暂停和停止同步控制原桌面任务", async t => {
+  const commands = []; let calls = 0;
+  const task = { id: "dt-test", status: "running" };
+  const { r, opts } = fixture(t, async () => ++calls === 1 ? action("desktop", { goal: "read" }) : action("done", { text: "结果" }),
+    { desktop: () => ({ taskId: task.id }), desktopTasks: () => [task], desktopCommand: (ids, op) => { commands.push({ ids, op }); } });
+  const j = r.create({ prompt: "read" }); r.tick(); await wait(); r.close();
+  const re = createRuntime(opts);
+  assert.equal(re.getJob(j.id).status, "waiting_desktop"); re.tick(); await wait(); assert.equal(calls, 1);
+  re.command(j.id, { op: "pause" }); re.command(j.id, { op: "resume" }); re.command(j.id, { op: "stop" });
+  assert.deepEqual(commands.map(c => c.op), ["pause", "resume", "stop"]);
+  assert.ok(commands.every(c => c.ids[0] === task.id));
+  re.close();
+});
+test("模型重试进度可见，已完成的工具不会重新执行", async t => {
+  let calls = 0, searches = 0;
+  const { r } = fixture(t, async (system, messages, signal, onRetry) => {
+    if (++calls === 1) return action("search", { query: "source" });
+    onRetry({ reason: "length", maxTokens: 8192 });
+    assert.match(messages.at(-1).content, /工具返回/);
+    return action("done", { text: "recovered" });
+  }, { search: async () => { searches++; return { text: "source" }; } });
+  const j = r.create({ prompt: "research" }); r.tick(); await wait();
+  assert.equal(r.getJob(j.id).status, "done"); assert.equal(searches, 1);
+  assert.match(r.getJob(j.id).events.find(e => e.kind === "retry").detail, /8192.*重试一次/);
+});
 test("个性化建议只保存不执行，计划可修改且坏时间不破坏原计划",async t=>{
   let writes=0;const plans=[action("idea",{title:"阅读",prompt:"安排阅读",reason:"用户目标"}),action("done",{text:"suggested"})];
   const {r}=fixture(t,async()=>plans.shift(),{connector:async()=>{writes++;}});

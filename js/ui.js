@@ -287,6 +287,10 @@
       head.innerHTML = '<span class="stop-ico">⏹</span><span>任务已按你的指示停止</span>';
     } else if (m.state === "aborted") {
       head.innerHTML = '<span class="stop-ico">⏹</span><span>任务已中断</span>';
+    } else if (m.state === "failed") {
+      head.innerHTML = '<span class="stop-ico">!</span><span>任务失败 · 进度已保留，可在活动页继续</span>';
+    } else if (m.state === "waiting") {
+      head.innerHTML = '<span class="stop-ico">⏸</span><span>等待本人操作 · 可在计算机页查看</span>';
     } else {
       head.innerHTML = '<span class="ok-ico">✓</span><span>完成 · 全程已记录在审计日志</span>';
     }
@@ -540,6 +544,11 @@
       $("#chat-list").appendChild(node);
       scrollBottom(true);
     },
+    upsertReply: function (m) {
+      liveMsgs[m.id] = m;
+      if (!msgDom[m.id]) hooks.streamStart(m);
+      hooks.streamEnd(m.id);
+    },
     streamDelta: function (id, chunk) {
       var m = liveMsg(id);
       if (m) { m.text = (m.text || "") + chunk; }
@@ -720,13 +729,33 @@
     var pop = $("#model-popover");
     pop.innerHTML = "";
     var cur = window.LumenAI.current();
+    var backend = window.LumenContinuity && window.LumenContinuity.model;
+    var backendActive = backend && backend.ready && store.state.settings.serverTasks !== false;
+    var readyCount = 0;
+    if (backend && backend.ready) {
+      readyCount++;
+      pop.appendChild(el("div", "pop-group", "后台聊天与计算机任务"));
+      (backend.models || [{ model: backend.model, vision: backend.vision }]).forEach(function (choice) {
+        var sel = backendActive && backend.model === choice.model;
+        var item = el("button", "pop-item" + (sel ? " sel" : "")); item.type = "button";
+        item.innerHTML = esc(choice.model) + '<span class="m-prov">' + (sel ? "● " : "") + (choice.vision ? "支持图片" : "文字") + "</span>";
+        item.addEventListener("click", async function () {
+          item.disabled = true;
+          try { await window.LumenContinuity.selectModel(choice.model); updateModelChip(); closePopover(); toast("后台模型已切换到 " + choice.model); }
+          catch (e) { toast("模型切换失败：" + e.message); }
+          finally { item.disabled = false; }
+        });
+        pop.appendChild(item);
+      });
+    }
 
-    var demo = el("button", "pop-item" + (cur ? "" : " sel"));
+    var demo = el("button", "pop-item" + (cur || backendActive ? "" : " sel"));
     demo.type = "button";
     demo.innerHTML = "🪄 演示模式<span class=\"m-prov\">本地引擎</span>";
     demo.addEventListener("click", function () {
       store.state.settings.activeProvider = "";
       store.state.settings.activeModel = "";
+      store.state.settings.serverTasks = false;
       store.save();
       updateModelChip();
       closePopover();
@@ -734,7 +763,6 @@
     });
     pop.appendChild(demo);
 
-    var readyCount = 0;
     Object.keys(window.LumenAI.PRESETS).forEach(function (pid) {
       if (!window.LumenAI.isReady(pid)) return;
       readyCount++;
@@ -743,17 +771,25 @@
       var models = cfg.models.slice();
       if (cfg.model && models.indexOf(cfg.model) === -1) models.unshift(cfg.model);
       models.forEach(function (mo) {
-        var sel = cur && store.state.settings.activeProvider === pid && store.state.settings.activeModel === mo;
+        var sel = !backendActive && cur && store.state.settings.activeProvider === pid && cur.model === mo;
         var item = el("button", "pop-item" + (sel ? " sel" : ""));
         item.type = "button";
-        item.innerHTML = esc(mo) + "<span class=\"m-prov\">" + (sel ? "● 使用中" : "") + "</span>";
-        item.addEventListener("click", function () {
-          store.state.settings.activeProvider = pid;
-          store.state.settings.activeModel = mo;
-          store.save();
-          updateModelChip();
-          closePopover();
-          toast("已切换到 " + mo);
+        item.innerHTML = esc(mo) + "<span class=\"m-prov\">" + (sel ? "● 使用中" : /^glm[-_.]5[.-]3[-_.]flash$/i.test(mo) ? "支持图片" : "") + "</span>";
+        item.addEventListener("click", async function () {
+          item.disabled = true;
+          try {
+            if (backendActive) {
+              if (pid === "localgw") await window.LumenContinuity.selectModel(mo);
+              else await window.LumenContinuity.configureModel(Object.assign({}, cfg, { model: mo, imageModel: backend.imageModel }));
+            }
+            store.state.settings.activeProvider = pid;
+            store.state.settings.activeModel = mo;
+            store.save();
+            updateModelChip();
+            closePopover();
+            toast("已切换到 " + mo);
+          } catch (e) { toast("模型切换失败：" + e.message); }
+          finally { item.disabled = false; }
         });
         pop.appendChild(item);
       });
@@ -1093,6 +1129,7 @@
   // —— 桌面虚拟机卡片：状态 + Live 画面 + 任务（轮询刷新，iframe 只建一次） ——
   var vmDeskTimer = null;
   var vmDeskNodes = null; // 稳定 DOM 引用：chip / statusLine / toolbar / live / tasks
+  var vmDeskRefreshBusy = false;
 
   var DESK_STATE = {
     running: ["运行中", ""],
@@ -1100,6 +1137,7 @@
     building: ["构建镜像中…", "off"],
     stopped: ["已停止", "off"],
     nodocker: ["Docker 未运行", "off"],
+    unavailable: ["虚拟机连接未恢复", "off"],
     unknown: ["未探测", "off"],
   };
 
@@ -1228,19 +1266,20 @@
   }
 
   function refreshVmDesktop(first) {
-    if (!vmDeskNodes) return;
+    if (!vmDeskNodes || vmDeskRefreshBusy) return;
+    vmDeskRefreshBusy = true;
     desktopApi("/vm/desktop/status").then(function (st) {
       if (!vmDeskNodes) return;
       window.LumenDesktop.available = !!(st && st.daemon);
       window.LumenDesktop.imageReady = !!(st && st.imageReady);
-      var state = st && st.daemon ? (st.state || "stopped") : "nodocker";
+      var state = st && st.error && !st.daemon ? "unavailable" : st && st.daemon ? (st.state || "stopped") : "nodocker";
       var pair = DESK_STATE[state] || DESK_STATE.unknown;
       vmDeskNodes.chip.textContent = pair[0];
       vmDeskNodes.chip.className = "vm-tag" + (pair[1] ? " " + pair[1] : "");
 
       var img = st && st.imageReady;
       vmDeskNodes.statusLine.innerHTML =
-        "Docker：" + (st && st.daemon ? "✅ " + String(st.daemon).slice(0, 14) : "❌ 未运行（打开 Docker Desktop）") +
+        "Docker：" + (st && st.daemon ? "✅ " + String(st.daemon).slice(0, 14) : st && st.error ? "⚠ 连接检查未通过" : "❌ 未运行（打开 Docker Desktop）") +
         " · 镜像：" + (img ? "✅ lumen-box" : "⏳ 未构建（首次启动会自动构建）") +
         (st && st.environment && st.environment.os ? " · " + esc(st.environment.os) : "") +
         (st && st.ports ? " · 端口 " + st.ports.http + "/" + st.ports.vnc : "") +
@@ -1274,7 +1313,7 @@
           });
           tb.appendChild(upgrade);
         }
-      } else if (st && st.daemon) {
+      } else if (st && (st.daemon || state === "unavailable")) {
         var start = el("button", "chip solid", state === "building" || !img ? "构建并启动（首次较慢）" : "启动虚拟机");
         start.type = "button";
         start.addEventListener("click", function () {
@@ -1341,7 +1380,7 @@
       }
 
       // 任务列表
-      desktopApi("/vm/desktop/tasks").then(function (d) {
+      return desktopApi("/vm/desktop/tasks").then(function (d) {
         if (!vmDeskNodes) return;
         var list = (d && d.tasks) || [];
         var box2 = vmDeskNodes.tasksBox;
@@ -1350,7 +1389,7 @@
         box2.appendChild(el("div", "vm-card-head", "📋 桌面任务 · " + list.length + "（服务端执行，关页不中断）"));
         list.slice(0, 5).forEach(function (t) {
           var row = el("div", "vm-task");
-          var stChip = { running: "● 执行中", waiting_approval: "⚠ 待批准", done: "✓ 完成", failed: "✗ 失败", stopped: "⏹ 已停止", queued: "…排队", paused: "⏸ 已暂停" }[t.status] || t.status;
+          var stChip = { running: "● 执行中", waiting_approval: "⚠ 待批准", waiting_user: "⏸ 等待本人操作", done: "✓ 完成", failed: "✗ 失败", stopped: "⏹ 已停止", queued: "…排队", paused: "⏸ 已暂停" }[t.status] || t.status;
           var head2 = el("div", "vm-task-head");
           head2.innerHTML = "<span class=\"st " + (t.status === "done" ? "ok" : t.status === "failed" ? "bad" : "") + "\">" + stChip + "</span>" +
             "<span class=\"goal\">" + esc(t.goal.slice(0, 46)) + "</span>" +
@@ -1375,7 +1414,7 @@
             act.appendChild(ok); act.appendChild(no);
             ap.appendChild(act);
             row.appendChild(ap);
-          } else if (t.status === "running" || t.status === "waiting_approval" || t.status === "queued" || t.status === "paused") {
+          } else if (["running", "waiting_approval", "queued", "paused", "failed", "waiting_user"].includes(t.status)) {
             var stopT = el("button", "chip", "停止任务");
             stopT.type = "button";
             stopT.style.marginTop = "6px";
@@ -1383,13 +1422,14 @@
               desktopApi("/vm/desktop/tasks/" + t.id + "/stop", "POST", {}).then(function () { refreshVmDesktop(); });
             });
             row.appendChild(stopT);
-            var pauseT = el("button", "chip", t.status === "paused" ? "▶ 继续" : "⏸ 暂停");
+            var resumable = ["paused", "failed", "waiting_user"].includes(t.status);
+            var pauseT = el("button", "chip", resumable ? "▶ 继续原任务" : "⏸ 暂停");
             pauseT.type = "button";
             pauseT.style.margin = "6px 0 0 6px";
             pauseT.addEventListener("click", function () {
-              var act = t.status === "paused" ? "resume" : "pause";
+              var act = resumable ? "resume" : "pause";
               desktopApi("/vm/desktop/tasks/" + t.id + "/" + act, "POST", {}).then(function (r) {
-                if (r && r.ok) toast(act === "pause" ? "已暂停（完成的动作保留，点继续接着跑）" : "已继续");
+                if (r && !r.error) toast(act === "pause" ? "已暂停（完成的动作保留，点继续接着跑）" : "已继续");
                 else toast("操作失败：" + (r && r.error || ""));
                 refreshVmDesktop();
               });
@@ -1419,7 +1459,7 @@
           box2.appendChild(row);
         });
       });
-    });
+    }).catch(function (e) { toast("计算机状态读取失败：" + e.message); }).finally(function () { vmDeskRefreshBusy = false; });
   }
 
   // 工作区文件在线编辑（对齐 Muse「VM 内文件可编辑」：改完直接存回虚拟工作区）

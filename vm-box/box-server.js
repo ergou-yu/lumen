@@ -82,6 +82,7 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 let ws = null;          // 当前附着的 page WebSocket
 let wsUrl = null;
+let selectedPageId = null;
 let msgId = 0;
 const pending = new Map();
 
@@ -95,24 +96,48 @@ function wsSend(method, params) {
   });
 }
 
+let browserStart = null;
+async function wakeBrowser() {
+  if (!browserStart) browserStart = (async () => {
+    const child = spawn("chromium", ["--no-sandbox", "--disable-dev-shm-usage", "--enable-unsafe-swiftshader", "--test-type", "--hide-crash-restore-bubble", "--remote-debugging-port=9222", "--remote-debugging-address=127.0.0.1", "--window-size=1160,640", "--window-position=60,38", "--no-first-run", "--no-default-browser-check", "--lang=zh-CN", "about:blank"], { env: { ...process.env, DISPLAY }, stdio: "ignore" });
+    let failure; child.on("error", e => { failure = e; }); child.unref();
+    for (let n = 0; n < 20; n++) {
+      if (failure) throw failure;
+      try { if ((await httpGetJson(CDP_HTTP + "/json/list")).some(p => p.type === "page")) return; } catch (_) {}
+      await sleep(500);
+    }
+    throw new Error("浏览器启动超时");
+  })().finally(() => { browserStart = null; });
+  return browserStart;
+}
 async function cdpPages() {
-  const list = await httpGetJson(CDP_HTTP + "/json/list");
+  let list;
+  try { list = await httpGetJson(CDP_HTTP + "/json/list"); }
+  catch (e) { if (e.code !== "ECONNREFUSED") throw e; await wakeBrowser(); list = await httpGetJson(CDP_HTTP + "/json/list"); }
   return (list || []).filter((t) => t.type === "page" && t.webSocketDebuggerUrl && !/^devtools:/i.test(t.url));
 }
 
 async function cdpAttach(pageIndex) {
   const pages = await cdpPages();
   if (!pages.length) throw new Error("没有可用的浏览器标签页");
-  const target = pages[Math.max(0, Math.min(pageIndex || 0, pages.length - 1))];
+  const target = pageIndex === undefined ? pages.find(p => p.id === selectedPageId) || pages[0]
+    : pages[Math.max(0, Math.min(pageIndex || 0, pages.length - 1))];
+  selectedPageId = target.id;
   if (ws && wsUrl === target.webSocketDebuggerUrl && ws.readyState === 1) return { pages, target };
   if (ws) { try { ws.close(); } catch (e) {} ws = null; }
   await new Promise((resolve, reject) => {
     ws = new WebSocket(target.webSocketDebuggerUrl);
+    const socket = ws;
     wsUrl = target.webSocketDebuggerUrl;
     const timer = setTimeout(() => reject(new Error("CDP 连接超时")), 5000);
     ws.onopen = () => { clearTimeout(timer); resolve(); };
     ws.onerror = () => { clearTimeout(timer); reject(new Error("CDP 连接失败")); };
-    ws.onclose = () => { ws = null; wsUrl = null; };
+    ws.onclose = () => {
+      if (ws !== socket) return;
+      ws = null; wsUrl = null;
+      for (const p of pending.values()) { clearTimeout(p.timer); p.reject(new Error("浏览器连接已断开，请重新观察")); }
+      pending.clear();
+    };
     ws.onmessage = (ev) => {
       let m;
       try { m = JSON.parse(ev.data); } catch (e) { return; }
@@ -131,8 +156,11 @@ async function cdpAttach(pageIndex) {
 // 页面内提取「可交互元素清单」（无障碍树式：角色/文本/坐标），不回传原始 HTML
 const OBSERVE_JS = `(() => {
   const out = [];
-  const sel = 'a,button,input,select,textarea,[role="button"],[role="link"],[role="tab"],[contenteditable="true"]';
-  const walk = document.querySelectorAll(sel);
+  const sel = 'a,button,input,select,textarea,[role="button"],[role="link"],[role="tab"],[role="menuitem"],[role="menuitemcheckbox"],[role="menuitemradio"],[role="option"],[role="combobox"],[role="checkbox"],[role="radio"],[role="switch"],[contenteditable="true"]';
+  const walk = Array.from(document.querySelectorAll(sel));
+  // 弹出菜单/对话框优先，避免前 40 个全是控制台导航栏。
+  const priority = el => el.closest('[role="dialog"],[role="menu"],[role="listbox"]') ? 0 : el.closest('main,[role="main"]') ? 1 : 2;
+  walk.sort((a,b) => priority(a) - priority(b));
   const vh = window.innerHeight, vw = window.innerWidth;
   for (const el of walk) {
     if (out.length >= 60) break;
@@ -141,6 +169,10 @@ const OBSERVE_JS = `(() => {
     if (r.bottom < 0 || r.top > vh || r.right < 0 || r.left > vw) continue;
     const st = getComputedStyle(el);
     if (st.visibility === "hidden" || st.display === "none" || +st.opacity === 0) continue;
+    if (el.disabled || el.getAttribute("aria-disabled") === "true") continue;
+    const cx = Math.max(1, Math.min(vw-1, r.x + r.width/2)), cy = Math.max(1, Math.min(vh-1, r.y + r.height/2));
+    const hit = document.elementFromPoint(cx,cy);
+    if (hit && hit !== el && !el.contains(hit)) continue;
     const text = String(el.innerText || el.value || el.getAttribute("aria-label") || el.getAttribute("title") || el.getAttribute("placeholder") || "").replace(/\\s+/g, " ").trim().slice(0, 80);
     const label = (el.labels && el.labels[0] && el.labels[0].innerText || "").replace(/\\s+/g, " ").trim().slice(0, 40);
     out.push({
@@ -152,8 +184,8 @@ const OBSERVE_JS = `(() => {
       name: el.getAttribute("name") || "",
       placeholder: el.getAttribute("placeholder") || "",
       sensitive: (el.getAttribute("type") === "password") || /password|passwd|secret/i.test(el.getAttribute("name") || "") ,
-      x: Math.round(r.x + r.width / 2),
-      y: Math.round(r.y + r.height / 2),
+      x: Math.round(cx),
+      y: Math.round(cy),
       w: Math.round(r.width),
       h: Math.round(r.height),
     });
@@ -161,6 +193,8 @@ const OBSERVE_JS = `(() => {
   return JSON.stringify({
     url: location.href,
     title: document.title,
+    text: (document.body.innerText || "").slice(0, 6000),
+    readyState: document.readyState,
     scrollY: Math.round(window.scrollY),
     pageH: document.documentElement.scrollHeight,
     viewH: vh,
@@ -185,7 +219,7 @@ async function viewportOrigin(chromeH) {
 }
 
 async function observe(max) {
-  await cdpAttach(0);
+  await cdpAttach();
   const r = await wsSend("Runtime.evaluate", { expression: OBSERVE_JS, returnByValue: true });
   const data = JSON.parse(r.result.value || "{}");
   const limit = Math.min(Math.max(parseInt(max, 10) || 40, 10), 60);
@@ -196,7 +230,7 @@ async function observe(max) {
     vx: el.x || 0, vy: el.y || 0,
     x: (el.x || 0) + origin.x,
     y: (el.y || 0) + origin.y,
-  }, el));
+  }, el, { x: (el.x || 0) + origin.x, y: (el.y || 0) + origin.y }));
   lastObserve = { ts: Date.now(), elements: data.elements };
   return data;
 }
@@ -204,7 +238,7 @@ async function observe(max) {
 let lastObserve = null;
 
 async function readPage() {
-  await cdpAttach(0);
+  await cdpAttach();
   const r = await wsSend("Runtime.evaluate", {
     expression: `JSON.stringify({url: location.href, title: document.title, text: (document.body.innerText||"").slice(0, 9000)})`,
     returnByValue: true,
@@ -224,6 +258,16 @@ async function cdpClick(el) {
 async function cdpInsertText(text) {
   await wsSend("Input.insertText", { text: String(text).slice(0, 2000) });
   await sleep(200);
+}
+
+async function browserKeys(args) {
+  await cdpAttach(); await wsSend("Page.bringToFront");
+  const found = await run("xdotool", ["search", "--onlyvisible", "--class", "chromium"]);
+  const id = found.out.trim().split(/\s+/)[0];
+  if (!/^\d+$/.test(id || "")) throw new Error("找不到浏览器窗口，未发送按键");
+  const focused = await run("xdotool", ["windowactivate", "--sync", id]);
+  if (!focused.ok) throw new Error("浏览器窗口无法激活，未发送按键");
+  return run("xdotool", args);
 }
 
 function elementByN(n) {
@@ -254,7 +298,7 @@ async function actOn(body) {
     case "navigate": {
       const url = String(args.url || "");
       if (!/^https?:\/\//i.test(url)) throw new Error("仅允许 http(s) 地址");
-      await cdpAttach(0);
+      await cdpAttach();
       await wsSend("Page.navigate", { url });
       await sleep(1200);
       return { ok: true, note: "已导航" };
@@ -270,8 +314,8 @@ async function actOn(body) {
       const el = elementByN(args.n);
       if (!el) throw new Error("没有第 " + args.n + " 个元素，请先 observe");
       await cdpClick(el);
-      await run("xdotool", ["key", "--clearmodifiers", "ctrl+a"]);
-      await run("xdotool", ["key", "Delete"]);
+      await browserKeys(["key", "--clearmodifiers", "ctrl+a"]);
+      await browserKeys(["key", "Delete"]);
       await cdpInsertText(args.text);
       return { ok: true, filled: { n: el.n, text: String(args.text || "").slice(0, 40) } };
     }
@@ -281,15 +325,17 @@ async function actOn(body) {
       if (!el) throw new Error("没有第 " + args.n + " 个元素，请先 observe");
       if (typeof args.value !== "string" || !args.value) throw new Error("value 缺失");
       await cdpClick(el);
-      await run("xdotool", ["key", "--clearmodifiers", "ctrl+a"]);
-      await run("xdotool", ["key", "Delete"]);
+      await browserKeys(["key", "--clearmodifiers", "ctrl+a"]);
+      await browserKeys(["key", "Delete"]);
       await cdpInsertText(args.value);
       return { ok: true, secretTyped: { n: el.n } }; // 响应里绝无 value
     }
     case "key": {
       const k = String(args.key || "");
       if (!/^[A-Za-z0-9_+\-]+$/i.test(k)) throw new Error("按键名非法");
-      const r = await run("xdotool", ["key", "--", k]);
+      if (/^(ctrl|control)\+w$/i.test(k)) return actOn({ op: "tabclose" });
+      if (/^(ctrl|control)\+t$/i.test(k)) return actOn({ op: "tabnew" });
+      const r = await browserKeys(["key", "--", k]);
       await sleep(400);
       return { ok: r.ok, note: "key " + k };
     }
@@ -297,7 +343,7 @@ async function actOn(body) {
       const dy = parseInt(args.dy, 10) || 600;
       const key = dy >= 0 ? "Page_Down" : "Page_Up";
       const times = Math.min(Math.abs(Math.round(dy / 600)) || 1, 5);
-      const r = await run("xdotool", ["key", "--repeat", String(times), key]);
+      const r = await browserKeys(["key", "--repeat", String(times), key]);
       await sleep(400);
       return { ok: r.ok, note: "scroll " + dy };
     }
@@ -314,13 +360,19 @@ async function actOn(body) {
       return { ok: true, note: "已切到标签 " + (i + 1) };
     }
     case "tabnew": {
-      await run("xdotool", ["key", "ctrl+t"]);
-      await sleep(900);
+      await cdpAttach();
+      const created = await wsSend("Target.createTarget", { url: "about:blank" });
+      selectedPageId = created.targetId; await cdpAttach(); await wsSend("Page.bringToFront");
       return { ok: true, note: "新标签页" };
     }
     case "tabclose": {
-      await run("xdotool", ["key", "ctrl+w"]);
-      await sleep(600);
+      await cdpAttach(); const targetId = selectedPageId;
+      if ((await cdpPages()).length === 1) await wsSend("Target.createTarget", { url: "about:blank" });
+      // 从保留的标签页关闭目标，避免关闭自身 CDP 会话时丢失回执。
+      selectedPageId = (await cdpPages()).find(p => p.id !== targetId).id;
+      await cdpAttach();
+      await wsSend("Target.closeTarget", { targetId });
+      await wsSend("Page.bringToFront");
       return { ok: true, note: "已关闭标签" };
     }
     case "observe": {

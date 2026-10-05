@@ -2,7 +2,7 @@
 (function () {
   "use strict";
   var store = window.LumenStore, latest = null, attached = {}, online = false, pollBusy = false, needsRender = false;
-  var states = { queued: "排队中", running: "执行中", executing: "执行已批准动作", done: "完成", failed: "失败", paused: "已暂停", stopped: "已停止", sleeping: "等待跟进", waiting_children: "等待子任务", waiting_approval: "等待批准", uncertain: "需要核实外部结果" };
+  var states = { queued: "排队中", running: "执行中", executing: "执行已批准动作", done: "完成", failed: "失败", paused: "已暂停", stopped: "已停止", sleeping: "等待跟进", waiting_children: "等待子任务", waiting_desktop: "等待计算机执行结果", waiting_user: "等待本人操作", waiting_approval: "等待批准", uncertain: "需要核实外部结果" };
   var root = document.createElement("section"); root.id = "panel-activity"; root.className = "panel"; root.hidden = true;
   root.innerHTML = '<header class="page-head"><h1>持续工作</h1><p class="page-sub">把责任交给 Lumi。任务与记忆保存在服务桥，关闭页面后继续。</p></header><div id="continuity-status" role="status"></div><div class="continuity-grid"><div id="continuity-main"></div><aside id="continuity-side"></aside></div>';
   document.querySelector("main").appendChild(root);
@@ -79,8 +79,8 @@
         button(approval, "拒绝并停止", function () { return command(j, "approve", { approvalId: j.pending.id, allow: false }); }); c.appendChild(approval);
       }
       var controls = node("div", "continuity-actions");
-      if (["running", "queued", "sleeping", "waiting_children", "waiting_approval"].includes(j.status)) button(controls, "暂停", function () { return command(j, "pause"); });
-      if (["paused", "failed", "sleeping"].includes(j.status)) button(controls, "继续", function () { return command(j, "resume"); });
+      if (["running", "queued", "sleeping", "waiting_children", "waiting_desktop", "waiting_approval"].includes(j.status)) button(controls, "暂停", function () { return command(j, "pause"); });
+      if (["paused", "failed", "sleeping", "waiting_user"].includes(j.status)) button(controls, "继续", function () { return command(j, "resume"); });
       if (!["done", "stopped", "executing"].includes(j.status)) button(controls, "停止", function () { return command(j, "stop"); });
       if (["done", "stopped", "failed", "uncertain"].includes(j.status)) button(controls, "删除记录", function () { return api("/agent/jobs/" + j.id, "DELETE", {}); }); c.appendChild(controls);
       if (!["executing", "uncertain", "stopped"].includes(j.status)) {
@@ -178,14 +178,17 @@
         if (msg) a = attached[j.id] = { convId: conv.id, actId: msg.id, status: "", hooks: window.LumenUI.taskHooks };
       }
       if (!a || a.status === j.status + j.updatedAt) return; a.status = j.status + j.updatedAt;
-      var end = ["done", "failed", "stopped"].includes(j.status);
-      store.updateMessageIn(a.convId, a.actId, { state: j.status === "done" ? "done" : end ? "aborted" : "running", steps: [{ name: (states[j.status] || j.status) + " · " + (j.events.slice(-1)[0]?.detail || ""), status: end ? "done" : "active" }] });
+      var end = ["done", "failed", "stopped", "waiting_user"].includes(j.status);
+      store.updateMessageIn(a.convId, a.actId, { state: j.status === "waiting_user" ? "waiting" : j.status === "failed" ? "failed" : j.status === "done" ? "done" : end ? "aborted" : "running", steps: [{ label: (states[j.status] || j.status) + " · " + (j.events.slice(-1)[0]?.detail || ""), status: j.status === "done" ? "done" : end ? "pending" : "active" }] });
       a.hooks.patchActivity(a.actId, {});
       if (end) {
         var conv = store.state.conversations.find(function (c) { return c.id === a.convId; });
-        if (conv && !conv.messages.some(function (m) { return m.serverJobId === j.id && m.serverUpdatedAt === j.updatedAt && m.role === "agent"; })) {
-          var m = store.addMessageTo(a.convId, { role: "agent", serverJobId: j.id, serverUpdatedAt: j.updatedAt, text: j.result || j.error || "任务已停止" });
-          if (store.state.activeConvId === a.convId) { a.hooks.streamStart(m); a.hooks.streamEnd(m.id); }
+        if (conv) {
+          var reply = conv.messages.find(function (m) { return m.serverJobId === j.id && m.role === "agent"; });
+          if (reply && reply.serverUpdatedAt === j.updatedAt) return;
+          if (reply) store.updateMessageIn(a.convId, reply.id, { serverUpdatedAt: j.updatedAt, text: j.result || j.error || "任务已停止" });
+          else reply = store.addMessageTo(a.convId, { role: "agent", serverJobId: j.id, serverUpdatedAt: j.updatedAt, text: j.result || j.error || "任务已停止" });
+          if (store.state.activeConvId === a.convId) a.hooks.upsertReply(reply);
           if (voice.on && j.status === "done") voice.speak(j.result);
         }
       }
@@ -208,7 +211,7 @@
     finally { pollBusy = false; }
   }
   async function runTask(text, hooks) {
-    var conv = store.activeConversation(), act = store.addMessageTo(conv.id, { role: "activity", state: "running", intent: "background", steps: [{ name: "保存到服务桥", status: "active" }] }); hooks.activity(act);
+    var conv = store.activeConversation(), act = store.addMessageTo(conv.id, { role: "activity", state: "running", intent: "background", steps: [{ label: "保存到服务桥", status: "active" }] }); hooks.activity(act);
     try {
       var d = await api("/agent/jobs", "POST", { prompt: text, conversationId: conv.id });
       store.updateMessageIn(conv.id, act.id, { serverJobId: d.job.id }); attached[d.job.id] = { convId: conv.id, actId: act.id, hooks: hooks, status: "" }; await poll(true);
@@ -244,9 +247,21 @@
     poll(); setInterval(poll, 2000); window.addEventListener("focus", function () { poll(true); });
   }
   window.LumenContinuity = { init: init, runTask: runTask, poll: poll,
+    selectModel: async function (model) {
+      var d = await api("/agent/model/select", "POST", { model: model });
+      if (latest) latest.model = d;
+      store.state.settings.serverTasks = true; store.save();
+      await poll(true); return d;
+    },
+    configureModel: async function (config) {
+      var d = await api("/agent/model", "POST", config);
+      if (latest) latest.model = d;
+      store.state.settings.serverTasks = true; store.save();
+      await poll(true); return d;
+    },
     get model() { return online && latest ? latest.model : null; },
     get ready() { return online && latest && latest.model.ready; },
-    get running() { return latest ? latest.jobs.filter(function (j) { return ["queued", "running", "executing", "waiting_approval"].includes(j.status); }).length : 0; },
+    get running() { return latest ? latest.jobs.filter(function (j) { return ["queued", "running", "executing", "waiting_desktop", "waiting_approval"].includes(j.status); }).length : 0; },
     stop: function () { if (latest) return Promise.all(latest.jobs.filter(function (j) { return !["done", "failed", "stopped", "executing"].includes(j.status); }).map(function (j) { return command(j, "stop"); })); },
   };
 })();

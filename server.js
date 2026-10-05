@@ -1251,13 +1251,13 @@ async function boxContainerStatus() {
 }
 
 // 服务桥重启后内存状态会丢：从 docker 现场重新发现容器与端口（幂等，便宜）
-async function boxSyncState() {
+async function boxSyncState(force = false, timeout = 15000) {
   if (boxBuildPromise || boxStartPromise) return false;
-  if (box.state === "running" && box.ports) return true;
+  if (!force && box.state === "running" && box.ports) return true;
   try {
-    const st = await boxContainerStatus();
+    const st = await inspectDesktop((cmd, args) => sh(cmd, args, timeout), BOX_NAME);
     if (st && st.running) {
-      const pm = await sh("docker", ["port", BOX_NAME], 15000);
+      const pm = await sh("docker", ["port", BOX_NAME], timeout);
       const ports = { http: null, vnc: null };
       for (const line of pm.out.split("\n")) {
         const m = line.match(/^(3900|6901)\/tcp -> 127\.0\.0\.1:(\d+)/);
@@ -1269,6 +1269,8 @@ async function boxSyncState() {
         box.state = "running";
         return true;
       }
+    } else if (st) {
+      box.state = "stopped"; box.ports = null; box.error = "";
     }
   } catch (e) {}
   return false;
@@ -1356,11 +1358,23 @@ async function readDesktopHealth() {
   const r = await fetch("http://127.0.0.1:" + box.ports.http + "/health", { signal: AbortSignal.timeout(3000) });
   return r.ok ? r.json() : null;
 }
+let desktopRediscoveredAt = -Infinity;
 const checkDesktopHealth = createDesktopHealth({ health: readDesktopHealth, discover: async () => {
-  if (box.ports) return { live: false, daemon: null, imageReady: true, environment: null, error: "虚拟机连接超时或服务未响应，请重新连接" };
+  if (box.ports) {
+    // Docker 重启会重新分配端口；有限频率重新发现，不让轮询堆积 CLI 进程。
+    if (Date.now() - desktopRediscoveredAt >= 15000) {
+      desktopRediscoveredAt = Date.now();
+      await boxSyncState(true, 3000);
+      const environment = await readDesktopHealth().catch(() => null);
+      if (environment?.ok && environment.desktopVersion) return { live: true, daemon: "已连接", imageReady: true, environment };
+    }
+    if (box.state === "stopped" && !box.ports) return { live: false, daemon: "已连接", imageReady: true, environment: null };
+    return { live: false, daemon: null, imageReady: true, environment: null, error: "虚拟机连接超时或服务未响应，请重新连接" };
+  }
   const daemon = await dockerAvailable();
   if (daemon) await boxSyncState();
   else box.state = "nodocker";
+  if (daemon && box.state === "nodocker") box.state = "stopped";
   const environment = daemon ? await readDesktopHealth().catch(() => null) : null;
   return { live: !!environment?.ok, daemon, imageReady: environment?.ok ? true : daemon ? await boxImageExists() : false, environment };
 } });

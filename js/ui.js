@@ -147,6 +147,7 @@
 
   function switchTab(tab) {
     currentTab = tab;
+    if (window.LumenWorkspace) window.LumenWorkspace.onTab(tab);
     var panels = document.querySelectorAll(".panel");
     for (var i = 0; i < panels.length; i++) panels[i].hidden = true;
     var panel = $("#panel-" + tab);
@@ -1346,6 +1347,7 @@
               : "观看模式：滚轮滑的是本页，点右侧按钮接管虚拟机";
             try { localStorage.setItem("lumen-live-takeover", takeover ? "1" : "0"); } catch (e) {}
           }
+          vmDeskNodes.liveWrap.applyLiveMode = applyLiveMode;
           modeBtn.addEventListener("click", function () {
             var takeover = vmDeskNodes.liveWrap.classList.contains("watch");
             modeBtn.disabled = true;
@@ -1374,6 +1376,7 @@
         } else {
           var existing = vmDeskNodes.liveWrap.querySelector("iframe");
           if (existing.src !== st.novncUrl) existing.src = st.novncUrl;
+          vmDeskNodes.liveWrap.applyLiveMode(!!st.takeover);
         }
       } else {
         vmDeskNodes.liveWrap.hidden = true;
@@ -1404,12 +1407,12 @@
             var ok = el("button", "chip allow", "批准（发 10 分钟能力凭证）");
             ok.type = "button";
             ok.addEventListener("click", function () {
-              desktopApi("/vm/desktop/tasks/" + t.id + "/approve", "POST", { decision: "allow" }).then(function () { refreshVmDesktop(); });
+              desktopApi("/vm/desktop/tasks/" + t.id + "/approve", "POST", { decision: "allow", approvalId: t.pendingApproval.id }).then(function () { refreshVmDesktop(); });
             });
             var no = el("button", "chip deny", "拒绝");
             no.type = "button";
             no.addEventListener("click", function () {
-              desktopApi("/vm/desktop/tasks/" + t.id + "/approve", "POST", { decision: "deny" }).then(function () { refreshVmDesktop(); });
+              desktopApi("/vm/desktop/tasks/" + t.id + "/approve", "POST", { decision: "deny", approvalId: t.pendingApproval.id }).then(function () { refreshVmDesktop(); });
             });
             act.appendChild(ok); act.appendChild(no);
             ap.appendChild(act);
@@ -3657,6 +3660,7 @@
   function init() {
     injectGrain();
     store.activeConversation(); // 确保至少有一个会话
+    if (window.LumenWorkspace) window.LumenWorkspace.init();
     updateIdentity();
     bindComposer();
     bindGlobal();

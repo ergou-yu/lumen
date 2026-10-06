@@ -199,6 +199,7 @@
     try {
       var values = await Promise.all([api("/agent/state"), api("/channels"), api("/connectors/permissions")]); var d = values[0]; d.channels = values[1].channels; d.connectors = values[2].connectors; online = true;
       var changed = !latest || JSON.stringify(d) !== JSON.stringify(latest); latest = d;
+      if (window.LumenWorkspace) window.LumenWorkspace.onState(d);
       if (document.querySelector("#continuity-status").textContent.startsWith("服务桥未连接：")) message("");
       if (changed || force || needsRender) {
         syncJobs();

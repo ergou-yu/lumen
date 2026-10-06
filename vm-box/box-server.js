@@ -173,8 +173,8 @@ const OBSERVE_JS = `(() => {
     const cx = Math.max(1, Math.min(vw-1, r.x + r.width/2)), cy = Math.max(1, Math.min(vh-1, r.y + r.height/2));
     const hit = document.elementFromPoint(cx,cy);
     if (hit && hit !== el && !el.contains(hit)) continue;
-    const text = String(el.innerText || el.value || el.getAttribute("aria-label") || el.getAttribute("title") || el.getAttribute("placeholder") || "").replace(/\\s+/g, " ").trim().slice(0, 80);
     const label = (el.labels && el.labels[0] && el.labels[0].innerText || "").replace(/\\s+/g, " ").trim().slice(0, 40);
+    const text = String(el.getAttribute("aria-label") || label || el.innerText || el.getAttribute("title") || el.getAttribute("placeholder") || "").replace(/\\s+/g, " ").trim().slice(0, 80);
     out.push({
       tag: el.tagName.toLowerCase(),
       type: el.getAttribute("type") || "",
@@ -183,7 +183,10 @@ const OBSERVE_JS = `(() => {
       id: el.id || "",
       name: el.getAttribute("name") || "",
       placeholder: el.getAttribute("placeholder") || "",
-      sensitive: (el.getAttribute("type") === "password") || /password|passwd|secret/i.test(el.getAttribute("name") || "") ,
+      sensitive: (el.getAttribute("type") === "password") || /password|passwd|secret|api.?key|access.?token|auth.?token/i.test((el.getAttribute("name") || "") + " " + el.id),
+      value: el.type === "password" || /password|passwd|secret|api.?key|access.?token|auth.?token/i.test((el.name || "") + " " + el.id) ? undefined : el.value,
+      checked: typeof el.checked === "boolean" ? el.checked : undefined,
+      options: el.tagName === "SELECT" ? Array.from(el.options).map(o => ({value:o.value,text:o.text,disabled:o.disabled || !!o.parentElement.disabled})).slice(0,400) : undefined,
       x: Math.round(cx),
       y: Math.round(cy),
       w: Math.round(r.width),
@@ -318,6 +321,18 @@ async function actOn(body) {
       await browserKeys(["key", "Delete"]);
       await cdpInsertText(args.text);
       return { ok: true, filled: { n: el.n, text: String(args.text || "").slice(0, 40) } };
+    }
+    case "select": {
+      const el = elementByN(args.n);
+      if (!el || el.tag !== "select") throw new Error("目标不是原生下拉框，请先 observe");
+      const options = (el.options || []).filter(o => !o.disabled);
+      const index = options.findIndex(o => o.value === String(args.value) || o.text === String(args.value));
+      if (index < 0) throw new Error("没有该可选项");
+      await cdpClick(el);
+      await browserKeys(["key", "Home"]);
+      if (index) await browserKeys(["key", "--repeat", String(index), "Down"]);
+      await browserKeys(["key", "Return"]);
+      return { ok: true, selected: { n: el.n, value: options[index].value, text: options[index].text } };
     }
     case "secret-type": {
       // 值由宿主 Sentinel 获批后直接注入键盘事件；本服务不回显、不落日志

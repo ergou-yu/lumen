@@ -12,7 +12,7 @@ test("真实 Chromium：菜单优先、可信点击输入、切换标签后观�
   const html = '<!doctype html><meta charset="utf-8"><title>Lumi Browser Regression A</title><style>button{height:24px;width:110px}nav{display:flex;flex-wrap:wrap}main{padding:12px}[role=menuitem]{padding:15px;background:#def;width:220px}</style>' +
     '<nav>' + Array.from({ length: 50 }, (_, i) => `<button>导航 ${i}</button>`).join('') + '</nav><main><button onclick="document.getElementById(\'menu\').hidden=false">打开菜单</button>' +
     '<div id="menu" role="menu" hidden><div role="menuitem" tabindex="0" onclick="document.getElementById(\'result\').textContent=\'MENU_SELECTED\'">读取菜单结果</div></div>' +
-    '<input aria-label="测试输入" oninput="document.getElementById(\'result\').textContent=this.value"><p id="result">尚未操作</p></main>';
+    '<input aria-label="测试输入" oninput="document.getElementById(\'result\').textContent=this.value"><select aria-label="使用场景" onchange="document.getElementById(\'result\').textContent=\'PLAN=\'+this.value"><option value="none">选择场景</option><option value="student">学习</option><option value="developer">开发</option></select><p id="result">尚未操作</p></main>';
   const script = `const http=require('http');const server=http.createServer((req,res)=>{res.setHeader('Content-Type','text/html; charset=utf-8');res.end(req.url==='/b'?'<title>Lumi Browser Regression B</title><p>SECOND_TAB</p>':${JSON.stringify(html)});});server.listen(0,'127.0.0.1',()=>console.log(server.address().port));process.stdin.on('data',()=>process.exit(0));setTimeout(()=>process.exit(0),120000);`;
   const child = spawn("docker", ["exec", "-i", "lumen-box", "node", "-e", script]);
   const port = await new Promise((resolve, reject) => {
@@ -41,4 +41,6 @@ test("真实 Chromium：菜单优先、可信点击输入、切换标签后观�
   await act("click", { n: item.n }); assert.match((await act("read")).text, /MENU_SELECTED/);
   obs = await observe(); const input = obs.elements.find(e => e.tag === "input");
   await act("fill", { n: input.n, text: "INPUT_OK" }); assert.match((await act("read")).text, /INPUT_OK/);
+  obs=await observe();const select=obs.elements.find(e=>e.tag==="select");assert.ok(select);assert.equal(select.options.length,3);
+  await act("select",{n:select.n,value:"developer"});assert.match((await act("read")).text,/PLAN=developer/);
 });

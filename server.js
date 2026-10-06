@@ -33,7 +33,7 @@ const tls = require("tls");
 const crypto = require("node:crypto");
 const { safeGet, resolvePublic } = require("./lib/network");
 const { createModel } = require("./lib/model");
-const { pruneShots, plannerContext, recordResult, repeatedAction } = require("./lib/desktop-task");
+const { pruneShots, plannerContext, recordResult, repeatedAction, actionTarget } = require("./lib/desktop-task");
 const { createDesktopHealth } = require("./lib/desktop-health");
 const { createRuntime } = require("./lib/runtime");
 const { createChannels } = require("./lib/channels");
@@ -1181,7 +1181,7 @@ function sentinelReview(action, observeCtx, userInstruction) {
         reason: "点击对外动作按钮：「" + label.slice(0, 30) + "」",
         approval: {
           title: "执行对外动作",
-          detail: "Lumi 要点击「" + label.slice(0, 40) + "」。这可能产生下单、支付、发送或提交等对外后果，需要你批准。（已保存支付方式的商家，每次购买都会请你确认；也可在 设置 → 规则 里为此类动作配置放行/转交规则）",
+          detail: "Lumi 要在当前页面点击「" + label.slice(0, 40) + "」。请核对电脑画面中的内容，再批准此动作。",
           digest: digest,
         },
       };
@@ -1443,6 +1443,13 @@ function dtasksSave() {
     try { fs.writeFileSync(DTASKS_FILE, JSON.stringify(dtasks.slice(0, 40), null, 2)); } catch (e) {}
   }, 400);
 }
+// 重启时不重发可能已生效的动作；保留现场，让用户核实后接续。
+for (const t of dtasks) if (["queued", "running", "waiting_approval"].includes(t.status)) {
+  t.status = "waiting_user"; t.pendingApproval = null;
+  t.summary = t.inFlight?.external ? "服务中断时外部动作回执未确认，请接管核实是否已生效，再继续原任务。" : "服务已恢复，任务进度已保留。请继续原任务，Lumi 会重新观察当前页面。";
+  t.updatedAt = Date.now();
+}
+dtasksSave();
 
 function dtaskPublic(t) {
   return {
@@ -1504,14 +1511,15 @@ function waitIfPaused(t) {
 }
 
 let desktopTail = Promise.resolve();
+const desktopRunning = new Set();
 let desktopHumanControl = false;
-for (const old of dtasks) if (["running", "queued", "waiting_approval", "paused"].includes(old.status)) {
-  old.status = "stopped"; old.pendingApproval = null; old.summary = "服务重启；请检查页面后重新委托，避免重复外部操作";
-}
+let desktopControlVersion = 0;
 function runDesktopTask(t) {
+  if (desktopRunning.has(t.id)) return desktopTail;
+  desktopRunning.add(t.id);
   desktopTail = desktopTail.catch(() => {}).then(() => executeDesktopTask(t)).catch(e => {
     if (t.status !== "stopped") { t.status = "failed"; t.summary = "桌面执行失败：" + e.message; dstep(t, "error", t.summary); }
-  });
+  }).finally(() => desktopRunning.delete(t.id));
   return desktopTail;
 }
 async function executeDesktopTask(t) {
@@ -1529,7 +1537,7 @@ async function executeDesktopTask(t) {
     dtasksSave();
     return;
   }
-  dstep(t, "phase", "虚拟机就绪（端口 " + box.ports.http + "/" + box.ports.vnc + " · 可在「计算机」页实时观看）");
+  dstep(t, "phase", "虚拟机就绪 · 可在聊天旁实时观看");
   dstep(t, "info", "桌面规划模型：" + backgroundModel.status().desktopModel + (backgroundModel.status().desktopVision ? " · 已启用截图识别" : " · 文字观察"));
 
   let steps = 0;
@@ -1540,6 +1548,7 @@ async function executeDesktopTask(t) {
     while (desktopHumanControl && t.status !== "stopped") await new Promise(r => setTimeout(r, 250));
     if (t.status === "paused") await waitIfPaused(t);
     if (t.status === "stopped") break;
+    const planVersion = desktopControlVersion + ":" + (t.planVersion || 0);
     steps++;
     // 1) 观察
     let obs;
@@ -1561,16 +1570,18 @@ async function executeDesktopTask(t) {
       t.shot = path.basename(file);
       pruneShots(SHOT_DIR, t.id, t.shot);
       dtasksSave();
-    } catch (e) {}
+    } catch (e) { t.shot = null; }
 
     // 2) 模型规划
     const elLines = (obs.elements || []).slice(0, 40).map(el =>
       el.n + ". <" + el.tag + (el.type ? " type=" + el.type : "") + (el.sensitive ? " [敏感]" : "") + "> " + (el.text || el.placeholder || el.name || "") +
-      " @(" + el.x + "," + el.y + ")"
+      " @(" + el.x + "," + el.y + ")" + (el.options ? " 选项：" + JSON.stringify(el.options) : "") + (el.value && !el.sensitive ? " 当前值：" + el.value : "")
     ).join("\n");
     const vaultLine = vaultPublic().length ? "可用安全区凭证（用 secret 引用，值你拿不到）：" + vaultPublic().map(v => v.name).join("、") : "";
     const prompt = [
-      "任务目标：" + t.goal,
+      "用户完整委托：" + (t.userInstruction || t.goal),
+      "执行目标：" + t.goal,
+      "用户后续补充：" + (t.userUpdates || []).join("\n"),
       "",
       "当前页面：" + obs.url,
       "标题：" + obs.title + "（滚动 " + obs.scrollY + "/" + obs.pageH + "）",
@@ -1588,6 +1599,7 @@ async function executeDesktopTask(t) {
       '{"op":"click","args":{"n":1},"why":"…"} 点击第 n 个元素',
       '{"op":"fill","args":{"n":2,"text":"要输入的文本"},"why":"…"} 往第 n 个元素输入文本（敏感信息禁止写明文，用 secret）',
       '{"op":"fill","args":{"n":2,"secret":"安全区凭证名"},"why":"…"} 获批后由服务桥把凭证值直接注入该字段（你不知道值）',
+      '{"op":"select","args":{"n":2,"value":"选项值或完整文本"},"why":"…"} 选择原生下拉框中的已有选项',
       '{"op":"key","args":{"key":"Left/Right/Up/Down/Return/Escape/space/w/a/s/d 等"},"why":"…"} 按键（游戏操控主要靠它；截图里看到的操作提示照着按）',
       '{"op":"scroll","args":{"dy":600},"why":"…"} 滚动页面',
       '{"op":"read","args":{},"why":"…"} 读取当前页正文作为证据',
@@ -1595,14 +1607,17 @@ async function executeDesktopTask(t) {
       '{"op":"wait","args":{"ms":1500},"why":"…"} 等页面加载',
       '{"op":"done","args":{"summary":"一句话成果"},"why":"…"} 任务完成',
       '{"op":"handoff","args":{"summary":"需要本人操作或无法继续的具体原因"},"why":"…"} 停下等待本人',
-      "规则：信息足够就 done；被 Sentinel 拒绝过的动作换路径；不要重复无效动作。只有支持视觉的模型才可依据截图操作 Canvas 游戏。",
+      "规则：推进用户完整目标，打开表单或完成中间步骤不等于整个任务完成。登录、设置密码、验证码或条款需要本人时，handoff说明当前进度、本人要做什么、完成后还剩什么；本人完成后重新观察并接续。done只能用于验收目标已有实际证据。被 Sentinel 拒绝过的动作换路径；不要重复无效动作。只有支持视觉的模型才可依据截图操作 Canvas 游戏。",
+      "用户要求提交前批准时，提出对应click动作，Sentinel会自动挂起并向用户显示审批，批准前不会执行；不要为普通提交另外handoff询问，避免重复等待。",
     ].join("\n");
     const rep = await dtaskModel(prompt, t.shot ? path.join(SHOT_DIR, t.shot) : null, t);
+    if (t.status === "stopped") break;
+    if (t.status === "paused" || desktopHumanControl || planVersion !== desktopControlVersion + ":" + (t.planVersion || 0)) { steps--; continue; }
     if (rep.error) { dstep(t, "error", "模型调用失败：" + rep.error); break; }
     t.modelCalls = (t.modelCalls || 0) + 1;
     const m = String(rep.text || "").match(/\{[\s\S]*\}/);
     if (!m) {
-      // 模型没按 JSON 说话：纠偏重试一次；仍不行就把这段话当成果总结收工（模型收尾爱总结）
+      // 模型没按 JSON 说话：纠偏一次；仍无可执行动作则报告未完成。
       if (!t._jsonRetry) {
         t._jsonRetry = true;
         t._lastNote = "你上一条输出不是 JSON。请严格只输出一个 JSON 动作对象，不要任何解释文字。";
@@ -1629,7 +1644,7 @@ async function executeDesktopTask(t) {
     if (!act.op) { dstep(t, "error", "动作缺少 op"); break; }
 
     if (t.status === "stopped") break;
-    if (t.status === "paused" || desktopHumanControl) { steps--; continue; }
+    if (t.status === "paused" || desktopHumanControl || planVersion !== desktopControlVersion + ":" + (t.planVersion || 0)) { steps--; continue; }
     // 3) 完成
     if (act.op === "handoff") {
       t.summary = String(act.args && act.args.summary || act.why || "需要本人操作").slice(0, 1000);
@@ -1684,7 +1699,14 @@ async function executeDesktopTask(t) {
         if (deniedStreak >= 3) break;
         continue;
       }
-      grantToken(review.approval.digest, review.reason); // 发放限时能力凭证
+      // 等待期间人可能换页或修改表单；原编号不能直接用于新页面。
+      const fresh = await boxJson("/observe?max=40");
+      if (!fresh?.ok || actionTarget(act, obs) !== actionTarget(act, fresh) || planVersion !== desktopControlVersion + ":" + (t.planVersion || 0)) {
+        t._lastNote = "审批期间页面或控制权已变化，原动作已作废。先重新观察再规划。";
+        dstep(t, "info", t._lastNote); continue;
+      }
+      lastObserveCtx = fresh;
+      grantToken(review.approval.digest, review.reason);
       dstep(t, "sentinel", "✅ 已批准（能力凭证 10 分钟）—— " + review.reason);
     }
 
@@ -1705,16 +1727,24 @@ async function executeDesktopTask(t) {
     }
 
     if (t.status === "stopped") break;
-    if (desktopHumanControl || t.status === "paused") { steps--; continue; }
+    if (desktopHumanControl || t.status === "paused" || planVersion !== desktopControlVersion + ":" + (t.planVersion || 0)) { steps--; continue; }
     // 6) 执行（容器内真实 GUI 事件）
     let result;
+    const external = review.verdict === "ask" || (act.op === "click" && SENSITIVE_ACT.test(findElementMeta(act.args?.n, obs)?.text || ""));
+    t.inFlight = { op: act.op, external, time: Date.now() };
+    if (t.inFlight.external) fs.writeFileSync(DTASKS_FILE, JSON.stringify(dtasks.slice(0,40), null, 2));
     try {
       result = await boxJson("/act", { op: execAct.op, args: execAct.args });
     } catch (e) { result = { ok: false, error: e.message }; }
+    delete t.inFlight;
     recordResult(t, act, result, obs);
     if (!result || !result.ok) {
       t._lastNote = "动作失败：" + String(result && result.error || "").slice(0, 80);
       dstep(t, "act", "动作失败 —— " + t._lastNote);
+      if (external && /超时|timeout|fetch failed|socket|ECONN/i.test(result?.error || "")) {
+        t.status = "waiting_user"; t.summary = "外部动作回执未能确认。请先接管核实是否已生效，再继续；不会自动重复提交。";
+        dstep(t, "handoff", t.summary); break;
+      }
       continue;
     }
     deniedStreak = 0;
@@ -2173,11 +2203,18 @@ const agentRuntime = createRuntime({
     return r && r.mode === "handoff" ? "block" : r && (r.mode === "ask" || (r.mode === "explicit" && !ruleExplicit(r,j.userInstruction))) ? "ask" : "allow";
   },
   desktopTasks: j => dtasks.filter(t => t.sourceJobId === j.id || (j.desktopTaskIds || []).includes(t.id) || (j.conversationId && t.conversationId === j.conversationId)).slice(0, 8).map(dtaskPublic),
+  desktopSteer: (ids, text) => {
+    for (const t of dtasks.filter(t => ids.includes(t.id))) {
+      t.userUpdates = [...(t.userUpdates || []), text].slice(-8); t.planVersion = (t.planVersion || 0) + 1;
+      dstep(t, "info", "已收到用户补充，将重新观察后规划");
+    }
+  },
   desktopCommand: (ids, op) => {
     for (const t of dtasks.filter(t => ids.includes(t.id))) {
       if (op === "pause" && ["queued", "running", "waiting_approval"].includes(t.status)) t.status = "paused";
-      else if (op === "resume" && t.status === "paused") t.status = "running";
+      else if (op === "resume" && t.status === "paused" && desktopRunning.has(t.id)) t.status = "running";
       else if (op === "stop" && !["done", "failed", "stopped"].includes(t.status)) { t.status = "stopped"; t.pendingApproval = null; t._lastDecision = "stopped"; }
+      t.planVersion = (t.planVersion || 0) + 1;
       dstep(t, "info", "聊天任务控制：" + op);
     }
   },
@@ -2185,11 +2222,14 @@ const agentRuntime = createRuntime({
     if (taskId) {
       const old = dtasks.find(t => t.id === taskId && (t.sourceJobId === j.id || (j.desktopTaskIds || []).includes(t.id) || (j.conversationId && t.conversationId === j.conversationId)));
       if (!old) throw new Error("找不到本对话的桌面任务；先用 activity 核实");
+      const update = goal || j.prompt;
+      if (update) old.userUpdates = [...(old.userUpdates || []), update].slice(-8);
+      old.planVersion = (old.planVersion || 0) + 1;
       if (["failed", "stopped", "waiting_user"].includes(old.status)) {
         old.status = "queued"; old.summary = ""; old.pendingApproval = null; old._jsonRetry = false;
         old.userInstruction = (old.userInstruction || "") + "\n" + (j.userInstruction || "");
         dstep(old, "info", "继续原任务：先重新观察并核实已有结果，避免重复外部操作"); runDesktopTask(old);
-      } else if (old.status === "paused") { old.status = "running"; dstep(old, "info", "已继续原任务"); }
+      } else if (old.status === "paused") { old.status = desktopRunning.has(old.id) ? "running" : "queued"; if(old.status === "queued") runDesktopTask(old); dstep(old, "info", "已继续原任务"); }
       return { taskId: old.id, status: old.status, note: "已关联原任务，系统跟进实际结果" };
     }
     if (!goal) throw new Error("桌面任务目标不能为空");
@@ -2438,6 +2478,7 @@ const server = http.createServer(async function (req, res) {
   if (req.method === "POST" && p === "/vm/desktop/control") {
     try {
       const b = JSON.parse((await readBody(req, 4096)).toString());
+      if (desktopHumanControl !== !!b.takeover) desktopControlVersion++;
       desktopHumanControl = !!b.takeover;
       return json(res, 200, { ok: true, takeover: desktopHumanControl });
     } catch (_) { return json(res, 400, { ok: false, error: "请求体非法" }); }
@@ -2565,6 +2606,7 @@ const server = http.createServer(async function (req, res) {
       try { body = JSON.parse((await readBody(req, 64 * 1024)).toString("utf8")); }
       catch (e) { return json(res, 400, { ok: false, error: "请求体非法" }); }
       if (!t.pendingApproval) return json(res, 400, { ok: false, error: "没有待审批动作" });
+      if (body.approvalId !== t.pendingApproval.id) return json(res, 409, { ok: false, error: "审批已更新，请刷新后审阅当前动作" });
       const dec = body.decision === "allow" ? "allow" : "deny";
       t.pendingApproval = null; // 两种决定都要清：任务循环靠它感知决议（waitApproval 轮询）
       t._lastDecision = dec;
@@ -3507,13 +3549,14 @@ const server = http.createServer(async function (req, res) {
   if (req.method === "POST" && dtaskPause) {
     const t = dtasks.find(x => x.id === dtaskPause[1]);
     if (!t) return json(res, 404, { ok: false, error: "任务不存在" });
+    t.planVersion = (t.planVersion || 0) + 1;
     if (dtaskPause[2] === "pause") {
       if (["running", "queued", "waiting_approval"].indexOf(t.status) === -1) return json(res, 400, { ok: false, error: "任务当前状态不可暂停：" + t.status });
       t.status = "paused";
       dstep(t, "info", "⏸ 已暂停（已完成的动作保留；继续点 Resume）");
     } else {
       if (!["paused", "failed", "waiting_user"].includes(t.status)) return json(res, 400, { ok: false, error: "当前状态不能继续" });
-      if (t.status === "paused") t.status = "running";
+      if (t.status === "paused" && desktopRunning.has(t.id)) t.status = "running";
       else {
         t.status = "queued"; t.summary = ""; t.pendingApproval = null; t._jsonRetry = false;
         runDesktopTask(t);

@@ -105,6 +105,7 @@
           </div>
         </div>
         <div class="chat-actions">
+          <button class="chip" id="btn-open-computer" type="button" aria-expanded="false" aria-controls="computer-workspace">打开电脑</button>
           <button class="chip" id="model-chip" type="button" title="切换模型">演示模式 ▾</button>
           <button class="icon-btn" id="btn-history" type="button" title="历史对话">
             <svg viewBox="0 0 24 24" class="ico"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3.5 2"/></svg>
@@ -135,6 +136,15 @@
         <div class="composer-hint">Lumi 会在关键动作前请求你的批准 · 随时可中断 · 切换页面它仍在后台继续工作</div>
       </footer>
     </section>
+
+    <aside id="computer-workspace" class="computer-workspace" aria-label="Lumi 电脑工作区" hidden>
+      <header class="workspace-head"><div><h2>Lumi 的电脑</h2><span id="workspace-state">正在连接</span></div><button id="workspace-close" class="icon-btn" type="button" aria-label="收起电脑">×</button></header>
+      <div id="workspace-screen" class="workspace-screen watch"><div id="workspace-empty">电脑连接后，实时画面会显示在这里。</div></div>
+      <div id="workspace-controls" class="workspace-controls"></div>
+      <p id="workspace-hint" class="workspace-hint" role="status">可观看执行，随时接管。</p>
+      <div id="workspace-approval" class="workspace-approval" hidden></div>
+      <div id="workspace-progress" class="workspace-progress"></div>
+    </aside>
 
     <!-- ===== 动态 ===== -->
     <section id="panel-feed" class="panel" hidden>
@@ -279,6 +289,7 @@
 <script src="js/qrcode.js"></script>
 <script src="js/agent.js"></script>
 <script src="js/ui.js"></script>
+<script src="js/workspace.js"></script>
 <script src="js/continuity.js"></script>
 <script>window.addEventListener('DOMContentLoaded', function(){ LumenUI.init(); LumenContinuity.init(); });</script>
 </body>

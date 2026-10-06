@@ -148,3 +148,23 @@ test("父任务等待独立子任务，停止父任务不误停子任务",async 
     return action("done",{text:"result"});
   });const j=r.create({prompt:"parent"});r.tick();await wait();assert.equal(r.getJob(j.id).status,"waiting_children");assert.equal(r.snapshot().jobs.length,2);r.command(j.id,{op:"stop"});r.tick();await wait();assert.equal(r.snapshot().jobs.find(x=>x.parentId===j.id).status,"done");assert.equal(r.getJob(j.id).status,"stopped");
 });
+
+test("登录完成的自然回复接续原任务，并保留完整委托", async t => {
+  const task={id:"dt-login",status:"waiting_user",summary:"请本人登录"};let calls=0;
+  const {r}=fixture(t,async()=>{calls++;return action("done",{text:"unused"});},{desktopTasks:()=>[task],desktop:async(g,j,id)=>{assert.equal(id,task.id);assert.match(j.userInstruction,/生成最终回执/);assert.match(j.prompt,/登录好了/);task.status="running";return {taskId:id};}});
+  const old=r.create({prompt:"填表并生成最终回执，登录时交给我",conversationId:"signup"});Object.assign(r.getJob(old.id),{status:"waiting_user",desktopTaskIds:[task.id],result:"请本人登录"});
+  const reply=r.create({prompt:"我已经登录好了，继续",conversationId:"signup"});r.tick();await wait();
+  assert.deepEqual(r.getJob(reply.id).desktopTaskIds,[task.id]);assert.equal(calls,0);assert.equal(r.getJob(reply.id).status,"waiting_desktop");
+});
+test("补充资料能看到未完成的对话上下文，不能把等待本人当成完成",async t=>{
+  const task={id:"dt-form",status:"waiting_user",summary:"需要昵称"};let calls=0;
+  const {r}=fixture(t,async(sys,msgs)=>{calls++;assert.ok(msgs.some(m=>m.content.includes("实际状态：waiting_user")&&m.content.includes("需要昵称")));assert.ok(msgs.some(m=>m.content.includes("填表并生成回执")));return action("desktop",{taskId:task.id,goal:"用户补充昵称：LumiTest"});},{desktopTasks:()=>[task],desktop:(g,j,id)=>{assert.equal(id,task.id);assert.match(g,/LumiTest/);return {taskId:id};}});
+  const old=r.create({prompt:"填表并生成回执",conversationId:"form"});Object.assign(r.getJob(old.id),{status:"waiting_user",desktopTaskIds:[task.id],result:"需要昵称"});
+  const reply=r.create({prompt:"昵称用LumiTest",conversationId:"form"});r.tick();await wait();assert.equal(calls,1);assert.equal(r.getJob(reply.id).status,"waiting_desktop");
+});
+test("执行中的桌面补充传给原任务，不重新委托，原始授权不丢失",async t=>{
+  const task={id:"dt-steer",status:"running"};const updates=[];
+  const {r}=fixture(t,async()=>action("desktop",{goal:"填表"}),{desktopTasks:()=>[task],desktop:()=>({taskId:task.id}),desktopSteer:(ids,text)=>updates.push({ids,text})});
+  const j=r.create({prompt:"填表后生成回执",conversationId:"steer"});r.tick();await wait();r.command(j.id,{op:"steer",text:"昵称改为NewName"});
+  assert.equal(r.getJob(j.id).status,"waiting_desktop");assert.deepEqual(updates,[{ids:[task.id],text:"昵称改为NewName"}]);assert.match(r.getJob(j.id).userInstruction,/填表后生成回执/);
+});

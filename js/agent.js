@@ -1275,7 +1275,7 @@
           }).then(function (decision) {
             surfacedApproval = null;
             return desktopApi("/vm/desktop/tasks/" + taskId + "/approve", "POST",
-              { decision: decision === "deny" ? "deny" : "allow" }, null);
+              { decision: decision === "deny" ? "deny" : "allow", approvalId: ap.id }, null);
           }).catch(function () {});
         } else if (!t.pendingApproval) {
           surfacedApproval = null;

@@ -12,19 +12,25 @@ FROM node:22-trixie-slim
 ENV DEBIAN_FRONTEND=noninteractive \
     DISPLAY=:0
 
-# 国内网络优化：deb.debian.org → USTC 镜像（海外网络可删掉这一段）
+# 先通过 Debian 签名索引安装 CA，再启用 HTTPS 镜像；基础镜像未必带 CA。
 RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
     rm -f /etc/apt/apt.conf.d/docker-clean \
-    && sed -i 's|deb.debian.org|mirrors.ustc.edu.cn|g; s|security.debian.org|mirrors.ustc.edu.cn|g; s|http://mirrors.ustc.edu.cn|https://mirrors.ustc.edu.cn|g' \
+    && sed -i 's|deb.debian.org|mirrors.ustc.edu.cn|g; s|security.debian.org|mirrors.ustc.edu.cn|g' \
       /etc/apt/sources.list.d/debian.sources \
-    && apt-get update -o Acquire::Retries=8
+    && apt-get update -o Acquire::Retries=3 -o APT::Update::Error-Mode=any \
+    && apt-get install -y --no-install-recommends ca-certificates \
+    && sed -i 's|http://mirrors.ustc.edu.cn|https://mirrors.ustc.edu.cn|g' \
+      /etc/apt/sources.list.d/debian.sources \
+    && apt-get update -o Acquire::Retries=8 -o APT::Update::Error-Mode=any
 
 # 大包单独一层（chromium ~120MB / 中文字体 ~60MB）：失败重试时命中缓存，不再重复下载
-RUN --mount=type=cache,target=/var/cache/apt,sharing=locked apt-get install -y --no-install-recommends -o Acquire::Retries=3 \
+RUN --mount=type=cache,target=/var/cache/apt,sharing=locked apt-get update -o Acquire::Retries=3 \
+    && apt-get install -y --no-install-recommends -o Acquire::Retries=3 \
       chromium fonts-noto-cjk
 
 # 其余依赖一层（含中文 locale：否则浏览器下载的中文文件名会退化为 "download"）
-RUN --mount=type=cache,target=/var/cache/apt,sharing=locked apt-get install -y --no-install-recommends -o Acquire::Retries=3 \
+RUN --mount=type=cache,target=/var/cache/apt,sharing=locked apt-get update -o Acquire::Retries=3 \
+    && apt-get install -y --no-install-recommends -o Acquire::Retries=3 \
       xvfb xauth x11-utils xdotool imagemagick \
       x11vnc novnc websockify openbox tint2 feh lxterminal pcmanfm dbus-x11 \
       librsvg2-bin adwaita-icon-theme python3 python3-venv python3-pip python3-tk \

@@ -29,3 +29,21 @@ test("无进展时不重复点击；页面变化后可以继续同名操作", ()
   assert.equal(repeatedAction(t, act, obs), true);
   assert.equal(repeatedAction(t, act, { ...obs, text: "请选择 API 密钥" }), false);
 });
+
+test("填表值或勾选状态改变后允许重新规划同一控件",()=>{
+  const t={},act={op:"fill",args:{n:1}},obs={url:"https://example.com/form",text:"昵称",elements:[{n:1,text:"昵称",value:"old",checked:false}]};
+  recordResult(t,act,{ok:true},obs);recordResult(t,act,{ok:true},obs);
+  assert.equal(repeatedAction(t,act,obs),true);
+  assert.equal(repeatedAction(t,act,{...obs,elements:[{...obs.elements[0],value:"new"}]}),false);
+  assert.equal(repeatedAction(t,act,{...obs,elements:[{...obs.elements[0],checked:true}]}),false);
+});
+
+test("审批后按目标身份核对，编号复用或换页不能点击旧动作",()=>{
+  const {actionTarget}=require('../lib/desktop-task');const act={op:"click",args:{n:1}};
+  const before={url:"https://example.com/form",elements:[{n:1,tag:"button",id:"submit",text:"提交表单",x:10,y:20}]};
+  assert.equal(actionTarget(act,before),actionTarget(act,{...before,elements:[{...before.elements[0],x:300,y:80}]}));
+  assert.notEqual(actionTarget(act,before),actionTarget(act,{...before,elements:[{n:1,tag:"button",id:"delete",text:"删除"}]}));
+  assert.notEqual(actionTarget(act,before),actionTarget(act,{...before,url:"https://example.com/other"}));
+  const form={...before,elements:[...before.elements,{n:2,tag:"input",id:"name",value:"old"}]};
+  assert.notEqual(actionTarget(act,form),actionTarget(act,{...form,elements:[form.elements[0],{...form.elements[1],value:"new"}]}));
+});

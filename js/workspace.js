@@ -17,8 +17,11 @@
     return { job:job, task:task };
   }
   function visibility() {
-    var visible = opened && tab === "chat"; root.hidden = !visible;
+    var visible = opened && tab === "chat", changed = root.hidden === visible, scroll = $("chat-scroll");
+    var atEnd = scroll.scrollHeight - scroll.clientHeight - scroll.scrollTop < 80;
+    root.hidden = !visible;
     document.body.classList.toggle("workspace-open", visible);
+    if (changed && atEnd) scroll.scrollTo({top:scroll.scrollHeight, behavior:"instant"});
     $("btn-open-computer").setAttribute("aria-expanded", String(visible));
   }
   function open() { opened = true; visibility(); refresh(); }
